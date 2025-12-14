@@ -15,6 +15,10 @@ repository = "https://github.com/bearcove/hindsight"
 authors = ["Amos Wenger <amos@bearcove.net>"]
 
 [workspace.dependencies]
+# Bearcove ecosystem
+facet = { path = "../facet/facet" }
+rapace = { path = "../rapace/crates/rapace" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

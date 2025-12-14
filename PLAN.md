@@ -1,120 +1,223 @@
 # Hindsight Implementation Plan
-## Distributed Tracing Made Simple
+## Distributed Tracing Made Simple - Pure Rapace Edition
 
 ---
 
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
-2. [Phase 1: Protocol & Core Types](#phase-1-protocol--core-types)
-3. [Phase 2: Client Library](#phase-2-client-library)
-4. [Phase 3: Server - Storage & API](#phase-3-server---storage--api)
-5. [Phase 4: Web UI](#phase-4-web-ui)
-6. [Phase 5: TUI](#phase-5-tui)
-7. [Phase 6: Integrations](#phase-6-integrations)
-8. [Testing Strategy](#testing-strategy)
-9. [Future Enhancements](#future-enhancements)
+2. [Avoiding Infinite Loops](#avoiding-infinite-loops)
+3. [Phase 1: Protocol & Core Types](#phase-1-protocol--core-types)
+4. [Phase 2: Rapace Service Definition](#phase-2-rapace-service-definition)
+5. [Phase 3: Client Library](#phase-3-client-library)
+6. [Phase 4: Server Implementation](#phase-4-server-implementation)
+7. [Phase 5: Web UI (WASM + Rapace)](#phase-5-web-ui-wasm--rapace)
+8. [Phase 6: TUI (Native Rapace)](#phase-6-tui-native-rapace)
+9. [Phase 7: Integrations](#phase-7-integrations)
+10. [Testing Strategy](#testing-strategy)
+11. [Future Enhancements](#future-enhancements)
 
 ---
 
 ## Architecture Overview
 
-### System Diagram
+### Pure Rapace Design
+
+**Key Decision:** Hindsight uses **only Rapace RPC** for all communication. No REST APIs, no custom protocols.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Applications                              │
-├──────────────┬──────────────┬──────────────┬────────────────┤
-│  Your App    │   Rapace     │  Picante     │    Dodeca      │
-│ (hindsight)  │  (opt-in)    │  (opt-in)    │  (hindsight)   │
-└──────┬───────┴──────┬───────┴──────┬───────┴─────┬──────────┘
-       │              │              │             │
-       │ W3C Trace Context (traceparent header)    │
-       │              │              │             │
-       ▼              ▼              ▼             ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Hindsight Server (port 9090)                    │
-├─────────────────────────────────────────────────────────────┤
-│  Ingestion Layer:                                           │
-│  - POST /v1/traces (HTTP)                                   │
-│  - WebSocket /v1/traces/stream                              │
-│  - Future: Rapace RPC                                       │
-├─────────────────────────────────────────────────────────────┤
-│  Storage Layer:                                             │
-│  - TraceStore (DashMap<TraceId, Trace>)                     │
-│  - SpanStore (DashMap<SpanId, Span>)                        │
-│  - TTL: 1 hour default (configurable)                       │
-│  - Future: Disk persistence                                 │
-├─────────────────────────────────────────────────────────────┤
-│  Query Layer:                                               │
-│  - GET /v1/traces/:trace_id                                 │
-│  - GET /v1/traces (list, filter by service/time)            │
-│  - WebSocket /v1/traces/live (streaming updates)            │
-├─────────────────────────────────────────────────────────────┤
-│  UI Layer:                                                  │
-│  - GET / (embedded web UI)                                  │
-│  - WebSocket /v1/ui/stream (live UI updates)                │
-└─────────────────────────────────────────────────────────────┘
-              │                            │
-              ▼                            ▼
-     ┌────────────────┐          ┌──────────────────┐
-     │   Browser      │          │  hindsight-tui   │
-     │   (Web UI)     │          │  (Terminal UI)   │
-     └────────────────┘          └──────────────────┘
+Applications                        Hindsight Server
+┌───────────────┐                  ┌──────────────────────────┐
+│  Your App     │                  │  HindsightService        │
+│  (rapace)     │──Rapace RPC─────▶│  (Rapace service)        │
+│               │  TCP/SHM/Unix    │  - ingest_spans()        │
+└───────────────┘                  │  - get_trace()           │
+                                   │  - list_traces()         │
+┌───────────────┐                  │  - stream_traces()       │
+│  Picante      │──Rapace RPC─────▶│                          │
+│  (rapace)     │  TCP/SHM/Unix    └───────────┬──────────────┘
+└───────────────┘                              │
+                                               │ Rapace RPC
+┌───────────────┐                              │ (different transports)
+│  Dodeca       │──Rapace RPC─────▶            │
+│  (rapace)     │  TCP/SHM/Unix    ┌───────────┴──────────────┐
+└───────────────┘                  │                          │
+                                   │                          │
+                    ┌──────────────┴─┐          ┌─────────────┴─────┐
+                    ▼                ▼          ▼                   ▼
+              ┌─────────┐      ┌─────────┐  ┌─────────┐      ┌──────────┐
+              │ Browser │      │   TUI   │  │ Rapace  │      │  Picante │
+              │ (WASM)  │      │ (Native)│  │  Cell   │      │  (opt-in)│
+              └─────────┘      └─────────┘  └─────────┘      └──────────┘
+                   │                │            │                  │
+                   │ rapace-        │ rapace-    │ rapace-         │ rapace-
+                   │ transport-     │ transport- │ transport-      │ transport-
+                   │ websocket      │ tcp        │ tcp             │ shm
+                   │                │            │                  │
+                   └────────────────┴────────────┴──────────────────┘
+                          ALL USING RAPACE RPC!
 ```
 
-### Data Model
+### Why Pure Rapace?
 
-**W3C Trace Context:**
-- **TraceId**: 16 bytes (128-bit random)
-- **SpanId**: 8 bytes (64-bit random)
-- **traceparent header**: `00-{trace_id}-{span_id}-{flags}`
+1. **Dogfooding** - We use our own technology
+2. **Efficient** - Binary protocol, multiplexed channels
+3. **Type-safe** - Generated clients, no manual JSON parsing
+4. **Consistent** - Same protocol everywhere (native, browser, embedded)
+5. **Streaming** - Native Rapace streaming, not WebSocket hacks
+6. **Transport-agnostic** - TCP, WebSocket, SHM, Unix sockets
 
-**Span:**
+### The Only HTTP
+
+**One tiny route** to serve the static HTML page that loads the WASM client:
+
 ```rust
-pub struct Span {
-    pub trace_id: TraceId,
-    pub span_id: SpanId,
-    pub parent_span_id: Option<SpanId>,
-    pub name: String,
-    pub start_time: Timestamp,
-    pub end_time: Option<Timestamp>,
-    pub attributes: HashMap<String, AttributeValue>,
-    pub events: Vec<SpanEvent>,
-    pub status: SpanStatus,
-    pub service_name: String,
+// Minimal axum server ONLY for serving the WASM client
+Router::new()
+    .route("/", get(|| async {
+        Html(include_str!("ui/index.html"))
+    }))
+```
+
+Everything else? **Pure Rapace!**
+
+---
+
+## Avoiding Infinite Loops
+
+### The Problem
+
+If Hindsight traces itself, we get infinite recursion:
+
+```
+1. App sends span to Hindsight via Rapace
+2. Hindsight's Rapace session is traced
+3. Rapace sends span to Hindsight
+4. Hindsight's Rapace session is traced...
+∞. Stack overflow! 💥
+```
+
+### Solution 1: Untraced Sessions
+
+**Mark Hindsight's internal sessions as untraced:**
+
+```rust
+// In hindsight-server: create RPC session WITHOUT tracer
+let session = RpcSession::new(transport);
+// NO .with_tracer() call!
+
+// This session receives spans but doesn't emit them
+let service = HindsightServiceImpl::new(store);
+session.set_dispatcher(HindsightServiceServer::new(service));
+```
+
+**Key rule:** Hindsight's own RPC sessions **never** have a tracer attached.
+
+### Solution 2: Service-Level Filtering
+
+Applications can configure which services to trace:
+
+```rust
+// In your application
+let tracer = Tracer::connect("tcp://localhost:9090").await?
+    .with_service_filter(|service_name| {
+        // Don't trace calls TO Hindsight
+        service_name != "HindsightService"
+    });
+
+let session = RpcSession::new(transport)
+    .with_tracer(tracer);
+```
+
+### Solution 3: Opt-In Tracing
+
+**Default:** Rapace sessions are **not traced** unless explicitly opted in.
+
+```rust
+// Rapace without tracing (default)
+let session = RpcSession::new(transport);
+
+// Rapace WITH tracing (explicit opt-in)
+let session = RpcSession::new(transport)
+    .with_tracer(tracer); // <-- Only if you want tracing
+```
+
+This means:
+- Hindsight's own sessions: **no tracer** ✅
+- Your app's sessions: **optionally traced** ✅
+- Picante's internal RPC: **optionally traced** ✅
+
+### Solution 4: Trace ID Propagation
+
+Hindsight can detect cycles by checking trace IDs:
+
+```rust
+impl HindsightServiceImpl {
+    async fn ingest_spans(&self, spans: Vec<Span>) {
+        // Filter out spans that are FROM Hindsight itself
+        let spans: Vec<_> = spans.into_iter()
+            .filter(|span| span.service_name != "hindsight-server")
+            .collect();
+
+        self.store.ingest(spans);
+    }
 }
 ```
 
-**Trace:**
+### Documentation
+
+Clear docs in README.md:
+
+```markdown
+## Avoiding Self-Tracing
+
+⚠️ **Important:** Do NOT attach a tracer to Hindsight's RPC sessions!
+
+**Correct:**
 ```rust
-pub struct Trace {
-    pub trace_id: TraceId,
-    pub spans: Vec<Span>,
-    pub root_span_id: SpanId,
-    pub start_time: Timestamp,
-    pub end_time: Option<Timestamp>,
-    pub duration: Option<Duration>,
-}
+// Hindsight server creates session WITHOUT tracer
+let session = RpcSession::new(transport);
+session.set_dispatcher(HindsightServiceServer::new(service));
+```
+
+**Incorrect (causes infinite loop):**
+```rust
+// ❌ DON'T DO THIS!
+let session = RpcSession::new(transport)
+    .with_tracer(tracer); // <-- NO! Infinite loop!
+```
 ```
 
 ---
 
 ## Phase 1: Protocol & Core Types
 
-**Goal:** Define the shared protocol between client and server.
+**Goal:** Define W3C Trace Context and span data model using Facet for serialization.
 
 **Crate:** `hindsight-protocol`
 
-### 1.1 W3C Trace Context (`src/trace_context.rs`)
+### 1.1 Dependencies
+
+```toml
+[dependencies]
+facet = { path = "../../../facet" }
+serde = { version = "1", features = ["derive"] }
+time = { version = "0.3", features = ["serde"] }
+thiserror = "1"
+getrandom = "0.2"
+hex = "0.4"
+```
+
+### 1.2 W3C Trace Context (`src/trace_context.rs`)
 
 ```rust
+use facet::Facet;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// 16-byte trace ID (128 bits)
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TraceId([u8; 16]);
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Facet)]
+pub struct TraceId(pub [u8; 16]);
 
 impl TraceId {
     /// Generate a new random trace ID
@@ -146,8 +249,8 @@ impl fmt::Display for TraceId {
 }
 
 /// 8-byte span ID (64 bits)
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SpanId([u8; 8]);
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Facet)]
+pub struct SpanId(pub [u8; 8]);
 
 impl SpanId {
     /// Generate a new random span ID
@@ -179,7 +282,7 @@ impl fmt::Display for SpanId {
 }
 
 /// W3C traceparent header: "00-{trace_id}-{span_id}-{flags}"
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Facet)]
 pub struct TraceContext {
     pub trace_id: TraceId,
     pub span_id: SpanId,
@@ -209,7 +312,6 @@ impl TraceContext {
     }
 
     /// Parse from W3C traceparent header
-    /// Format: "00-{trace_id}-{span_id}-{flags}"
     pub fn from_traceparent(header: &str) -> Result<Self, TraceContextError> {
         let parts: Vec<&str> = header.split('-').collect();
         if parts.len() != 4 {
@@ -228,7 +330,7 @@ impl TraceContext {
         Ok(Self {
             trace_id,
             span_id,
-            parent_span_id: None, // Parent not in traceparent header
+            parent_span_id: None,
             flags,
         })
     }
@@ -257,9 +359,10 @@ pub enum TraceContextError {
 }
 ```
 
-### 1.2 Span Types (`src/span.rs`)
+### 1.3 Span Types (`src/span.rs`)
 
 ```rust
+use facet::Facet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -267,7 +370,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::trace_context::{TraceId, SpanId};
 
 /// Timestamp in nanoseconds since UNIX epoch
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Facet)]
 pub struct Timestamp(pub u64);
 
 impl Timestamp {
@@ -281,7 +384,7 @@ impl Timestamp {
 }
 
 /// Span represents a single operation in a trace
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
 pub struct Span {
     pub trace_id: TraceId,
     pub span_id: SpanId,
@@ -302,8 +405,8 @@ impl Span {
     }
 }
 
-/// Attribute value (simplified for now)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Attribute value
+#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
 #[serde(untagged)]
 pub enum AttributeValue {
     String(String),
@@ -313,7 +416,7 @@ pub enum AttributeValue {
 }
 
 /// Event within a span
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
 pub struct SpanEvent {
     pub name: String,
     pub timestamp: Timestamp,
@@ -321,7 +424,7 @@ pub struct SpanEvent {
 }
 
 /// Span completion status
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
 #[serde(tag = "type")]
 pub enum SpanStatus {
     Ok,
@@ -329,7 +432,7 @@ pub enum SpanStatus {
 }
 
 /// Complete trace (collection of spans)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
 pub struct Trace {
     pub trace_id: TraceId,
     pub spans: Vec<Span>,
@@ -339,12 +442,13 @@ pub struct Trace {
 }
 
 impl Trace {
-    /// Build a trace tree from a flat list of spans
+    /// Build a trace from a flat list of spans
     pub fn from_spans(mut spans: Vec<Span>) -> Self {
         spans.sort_by_key(|s| s.start_time.0);
 
         let trace_id = spans[0].trace_id;
-        let root_span = spans.iter().find(|s| s.parent_span_id.is_none())
+        let root_span = spans.iter()
+            .find(|s| s.parent_span_id.is_none())
             .expect("no root span found");
         let root_span_id = root_span.span_id;
         let start_time = root_span.start_time;
@@ -369,32 +473,62 @@ impl Trace {
             .collect()
     }
 }
+
+/// Summary of a trace (for listing)
+#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
+pub struct TraceSummary {
+    pub trace_id: TraceId,
+    pub root_span_name: String,
+    pub service_name: String,
+    pub start_time: Timestamp,
+    pub duration_nanos: Option<u64>,
+    pub span_count: usize,
+    pub has_errors: bool,
+}
+
+/// Filter for querying traces
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Facet)]
+pub struct TraceFilter {
+    pub service: Option<String>,
+    pub min_duration_nanos: Option<u64>,
+    pub max_duration_nanos: Option<u64>,
+    pub has_errors: Option<bool>,
+    pub limit: Option<usize>,
+}
 ```
 
-### 1.3 HTTP Protocol (`src/http.rs`)
+### 1.4 Event Types (`src/events.rs`)
 
 ```rust
+use facet::Facet;
 use serde::{Deserialize, Serialize};
-use crate::span::Span;
 
-/// Request to ingest spans
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IngestRequest {
-    pub spans: Vec<Span>,
-}
+use crate::span::*;
+use crate::trace_context::*;
 
-/// Response from ingestion
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IngestResponse {
-    pub accepted: usize,
-}
+/// Live event stream from Hindsight server
+#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
+#[serde(tag = "type")]
+pub enum TraceEvent {
+    /// New trace started
+    TraceStarted {
+        trace_id: TraceId,
+        root_span_name: String,
+        service_name: String,
+    },
 
-/// Query parameters for listing traces
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ListTracesQuery {
-    pub service: Option<String>,
-    pub limit: Option<usize>,
-    pub since: Option<u64>, // Unix timestamp
+    /// Trace completed
+    TraceCompleted {
+        trace_id: TraceId,
+        duration_nanos: u64,
+        span_count: usize,
+    },
+
+    /// New span added to a trace
+    SpanAdded {
+        trace_id: TraceId,
+        span: Span,
+    },
 }
 ```
 
@@ -404,46 +538,97 @@ crates/hindsight-protocol/src/
 ├── lib.rs
 ├── trace_context.rs
 ├── span.rs
-└── http.rs
-```
-
-**Testing:**
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_traceparent_roundtrip() {
-        let ctx = TraceContext::new_root();
-        let header = ctx.to_traceparent();
-        let parsed = TraceContext::from_traceparent(&header).unwrap();
-        assert_eq!(parsed.trace_id, ctx.trace_id);
-        assert_eq!(parsed.span_id, ctx.span_id);
-    }
-
-    #[test]
-    fn test_child_span() {
-        let root = TraceContext::new_root();
-        let child = root.child();
-        assert_eq!(child.trace_id, root.trace_id);
-        assert_eq!(child.parent_span_id, Some(root.span_id));
-    }
-}
+└── events.rs
 ```
 
 ---
 
-## Phase 2: Client Library
+## Phase 2: Rapace Service Definition
 
-**Goal:** Provide a simple API for applications to send spans.
+**Goal:** Define the HindsightService using Rapace's service macro.
+
+**Crate:** `hindsight-protocol`
+
+### 2.1 Service Definition (`src/service.rs`)
+
+```rust
+use rapace::Streaming;
+use facet::Facet;
+
+use crate::span::*;
+use crate::trace_context::*;
+use crate::events::*;
+
+/// Hindsight tracing service (pure Rapace RPC)
+#[rapace::service]
+pub trait HindsightService {
+    /// Ingest a batch of spans
+    ///
+    /// Returns the number of spans accepted.
+    ///
+    /// Note: This is an untraced method to prevent infinite loops!
+    async fn ingest_spans(&self, spans: Vec<Span>) -> u32;
+
+    /// Get a specific trace by ID
+    ///
+    /// Returns None if the trace is not found or has expired.
+    async fn get_trace(&self, trace_id: TraceId) -> Option<Trace>;
+
+    /// List recent traces with optional filtering
+    async fn list_traces(&self, filter: TraceFilter) -> Vec<TraceSummary>;
+
+    /// Stream live trace events
+    ///
+    /// Emits events as traces are created, spans are added, and traces complete.
+    /// This is a long-lived stream that continues until the client disconnects.
+    async fn stream_traces(&self) -> Streaming<TraceEvent>;
+
+    /// Health check (useful for monitoring)
+    async fn ping(&self) -> String;
+}
+```
+
+### 2.2 Update lib.rs
+
+```rust
+pub mod trace_context;
+pub mod span;
+pub mod events;
+pub mod service;
+
+pub use trace_context::*;
+pub use span::*;
+pub use events::*;
+pub use service::*;
+```
+
+---
+
+## Phase 3: Client Library
+
+**Goal:** Provide a simple API for sending spans via Rapace.
 
 **Crate:** `hindsight`
 
-### 2.1 Tracer (`src/tracer.rs`)
+### 3.1 Dependencies
+
+```toml
+[dependencies]
+hindsight-protocol = { path = "../hindsight-protocol" }
+rapace = { path = "../../../rapace/crates/rapace" }
+
+tokio = { version = "1", features = ["full"] }
+facet = { path = "../../../facet" }
+
+[features]
+default = []
+```
+
+### 3.2 Tracer (`src/tracer.rs`)
 
 ```rust
 use hindsight_protocol::*;
+use rapace::{RpcSession, Transport};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -453,35 +638,42 @@ pub struct Tracer {
 }
 
 struct TracerInner {
-    server_url: String,
     service_name: String,
-    http_client: reqwest::Client,
+    client: HindsightServiceClient,
     span_tx: mpsc::UnboundedSender<Span>,
 }
 
 impl Tracer {
-    /// Connect to a Hindsight server
-    pub async fn connect(server_url: impl Into<String>) -> Result<Self, TracerError> {
-        let server_url = server_url.into();
-
+    /// Connect to a Hindsight server via Rapace
+    ///
+    /// # Example
+    /// ```no_run
+    /// // TCP transport
+    /// let transport = rapace_transport_tcp::TcpTransport::connect("localhost:9090").await?;
+    /// let tracer = Tracer::new(transport).await?;
+    ///
+    /// // SHM transport (for same-machine communication)
+    /// let transport = rapace_transport_shm::ShmTransport::open("/tmp/hindsight.shm").await?;
+    /// let tracer = Tracer::new(transport).await?;
+    /// ```
+    pub async fn new<T: Transport + 'static>(transport: T) -> Result<Self, TracerError> {
         // Detect service name (from env, or default)
         let service_name = std::env::var("HINDSIGHT_SERVICE_NAME")
             .unwrap_or_else(|_| "unknown".to_string());
 
-        let http_client = reqwest::Client::new();
+        // Create Rapace session
+        // IMPORTANT: Do NOT attach a tracer to this session!
+        // (Prevents infinite loop)
+        let session = Arc::new(RpcSession::new(Arc::new(transport)));
+
+        // Create Rapace client
+        let client = HindsightServiceClient::new(session.clone());
 
         // Channel for buffering spans before sending
         let (span_tx, mut span_rx) = mpsc::unbounded_channel();
 
         // Background task to batch and send spans
-        let inner = Arc::new(TracerInner {
-            server_url: server_url.clone(),
-            service_name,
-            http_client: http_client.clone(),
-            span_tx,
-        });
-
-        let inner_clone = inner.clone();
+        let client_clone = client.clone();
         tokio::spawn(async move {
             let mut batch = Vec::new();
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -490,19 +682,25 @@ impl Tracer {
                 tokio::select! {
                     _ = interval.tick() => {
                         if !batch.is_empty() {
-                            send_batch(&inner_clone, &batch).await;
+                            let _ = client_clone.ingest_spans(batch.clone()).await;
                             batch.clear();
                         }
                     }
                     Some(span) = span_rx.recv() => {
                         batch.push(span);
                         if batch.len() >= 100 {
-                            send_batch(&inner_clone, &batch).await;
+                            let _ = client_clone.ingest_spans(batch.clone()).await;
                             batch.clear();
                         }
                     }
                 }
             }
+        });
+
+        let inner = Arc::new(TracerInner {
+            service_name,
+            client,
+            span_tx,
         });
 
         Ok(Self { inner })
@@ -516,20 +714,11 @@ impl Tracer {
             self.inner.span_tx.clone(),
         )
     }
-}
 
-async fn send_batch(inner: &TracerInner, spans: &[Span]) {
-    let req = IngestRequest {
-        spans: spans.to_vec(),
-    };
-
-    let url = format!("{}/v1/traces", inner.server_url);
-    let _ = inner.http_client
-        .post(&url)
-        .json(&req)
-        .send()
-        .await;
-    // Ignore errors (fire-and-forget for now)
+    /// Get the underlying Hindsight client (for advanced usage)
+    pub fn client(&self) -> &HindsightServiceClient {
+        &self.inner.client
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -539,7 +728,7 @@ pub enum TracerError {
 }
 ```
 
-### 2.2 Span Builder (`src/span_builder.rs`)
+### 3.3 Span Builder (`src/span_builder.rs`)
 
 ```rust
 use hindsight_protocol::*;
@@ -673,14 +862,19 @@ impl From<bool> for AttributeValue {
 }
 ```
 
-**Example Usage:**
+### 3.4 Example Usage
+
 ```rust
 use hindsight::Tracer;
+use rapace_transport_tcp::TcpTransport;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tracer = Tracer::connect("http://localhost:9090").await?;
+    // Connect to Hindsight via TCP
+    let transport = TcpTransport::connect("localhost:9090").await?;
+    let tracer = Tracer::new(transport).await?;
 
+    // Create a span
     let span = tracer.span("process_request")
         .with_attribute("user_id", 123)
         .with_attribute("endpoint", "/api/users")
@@ -689,33 +883,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Do work...
     process_request().await?;
 
+    // End the span (sends to Hindsight)
     span.end();
+
     Ok(())
 }
 ```
 
 ---
 
-## Phase 3: Server - Storage & API
+## Phase 4: Server Implementation
 
-**Goal:** Receive, store, and query traces.
+**Goal:** Implement the HindsightService and serve it via Rapace.
 
 **Crate:** `hindsight-server`
 
-### 3.1 Storage (`src/storage.rs`)
+### 4.1 Dependencies
+
+```toml
+[dependencies]
+hindsight-protocol = { path = "../hindsight-protocol" }
+rapace = { path = "../../../rapace/crates/rapace" }
+rapace-transport-tcp = { path = "../../../rapace/crates/rapace-transport-tcp" }
+rapace-transport-websocket = { path = "../../../rapace/crates/rapace-transport-websocket" }
+
+tokio = { version = "1", features = ["full"] }
+facet = { path = "../../../facet" }
+
+# Storage
+dashmap = "5"
+parking_lot = "0.12"
+
+# HTTP (only for serving static HTML)
+axum = { version = "0.7", features = ["ws"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Tracing (self-instrumentation - NOT sent to Hindsight!)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+time = "0.3"
+anyhow = "1"
+```
+
+### 4.2 Storage (`src/storage.rs`)
 
 ```rust
 use dashmap::DashMap;
 use hindsight_protocol::*;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::sync::broadcast;
 
 /// In-memory trace store with TTL
 pub struct TraceStore {
     traces: DashMap<TraceId, StoredTrace>,
     spans: DashMap<SpanId, Span>,
     ttl: Duration,
+    event_tx: broadcast::Sender<TraceEvent>,
 }
 
 struct StoredTrace {
@@ -724,16 +951,18 @@ struct StoredTrace {
 }
 
 impl TraceStore {
-    pub fn new(ttl: Duration) -> Self {
-        let store = Self {
+    pub fn new(ttl: Duration) -> Arc<Self> {
+        let (event_tx, _) = broadcast::channel(1000);
+
+        let store = Arc::new(Self {
             traces: DashMap::new(),
             spans: DashMap::new(),
             ttl,
-        };
+            event_tx,
+        });
 
         // Background task to clean up expired traces
-        let store_clone = Arc::new(store);
-        let store_weak = Arc::downgrade(&store_clone);
+        let store_weak = Arc::downgrade(&store);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
@@ -746,17 +975,39 @@ impl TraceStore {
             }
         });
 
-        Arc::try_unwrap(store_clone).unwrap()
+        store
     }
 
-    /// Ingest spans and build traces
-    pub fn ingest(&self, spans: Vec<Span>) {
+    /// Ingest spans and build/update traces
+    pub fn ingest(&self, spans: Vec<Span>) -> u32 {
+        let count = spans.len() as u32;
+
         for span in spans {
+            // Check if this is a new trace
+            let is_new_trace = span.parent_span_id.is_none()
+                && !self.spans.contains_key(&span.span_id);
+
+            if is_new_trace {
+                let _ = self.event_tx.send(TraceEvent::TraceStarted {
+                    trace_id: span.trace_id,
+                    root_span_name: span.name.clone(),
+                    service_name: span.service_name.clone(),
+                });
+            }
+
+            // Emit span added event
+            let _ = self.event_tx.send(TraceEvent::SpanAdded {
+                trace_id: span.trace_id,
+                span: span.clone(),
+            });
+
             self.spans.insert(span.span_id, span.clone());
 
             // Try to build/update trace
             self.update_trace(span.trace_id);
         }
+
+        count
     }
 
     /// Get a complete trace by ID
@@ -764,20 +1015,70 @@ impl TraceStore {
         self.traces.get(&trace_id).map(|entry| entry.trace.clone())
     }
 
-    /// List all traces (with optional filters)
-    pub fn list_traces(&self, service: Option<&str>, limit: usize) -> Vec<Trace> {
-        self.traces
+    /// List traces with filtering
+    pub fn list_traces(&self, filter: TraceFilter) -> Vec<TraceSummary> {
+        let mut summaries: Vec<TraceSummary> = self.traces
             .iter()
-            .filter(|entry| {
-                if let Some(service_name) = service {
-                    entry.trace.spans.iter().any(|s| s.service_name == service_name)
-                } else {
-                    true
+            .filter_map(|entry| {
+                let trace = &entry.trace;
+
+                // Apply filters
+                if let Some(service) = &filter.service {
+                    if !trace.spans.iter().any(|s| &s.service_name == service) {
+                        return None;
+                    }
                 }
+
+                let duration = trace.end_time.map(|e| e.0 - trace.start_time.0);
+
+                if let Some(min_dur) = filter.min_duration_nanos {
+                    if duration.map_or(true, |d| d < min_dur) {
+                        return None;
+                    }
+                }
+
+                if let Some(max_dur) = filter.max_duration_nanos {
+                    if duration.map_or(false, |d| d > max_dur) {
+                        return None;
+                    }
+                }
+
+                let has_errors = trace.spans.iter().any(|s| matches!(s.status, SpanStatus::Error { .. }));
+
+                if let Some(filter_errors) = filter.has_errors {
+                    if has_errors != filter_errors {
+                        return None;
+                    }
+                }
+
+                let root_span = trace.spans.iter()
+                    .find(|s| s.span_id == trace.root_span_id)?;
+
+                Some(TraceSummary {
+                    trace_id: trace.trace_id,
+                    root_span_name: root_span.name.clone(),
+                    service_name: root_span.service_name.clone(),
+                    start_time: trace.start_time,
+                    duration_nanos: duration,
+                    span_count: trace.spans.len(),
+                    has_errors,
+                })
             })
-            .take(limit)
-            .map(|entry| entry.trace.clone())
-            .collect()
+            .collect();
+
+        // Sort by start time (newest first)
+        summaries.sort_by(|a, b| b.start_time.0.cmp(&a.start_time.0));
+
+        // Apply limit
+        let limit = filter.limit.unwrap_or(100);
+        summaries.truncate(limit);
+
+        summaries
+    }
+
+    /// Subscribe to live trace events
+    pub fn subscribe_events(&self) -> broadcast::Receiver<TraceEvent> {
+        self.event_tx.subscribe()
     }
 
     fn update_trace(&self, trace_id: TraceId) {
@@ -790,6 +1091,21 @@ impl TraceStore {
 
         if !spans.is_empty() {
             let trace = Trace::from_spans(spans);
+
+            // Check if trace is complete
+            let is_complete = trace.end_time.is_some()
+                && trace.spans.iter().all(|s| s.end_time.is_some());
+
+            if is_complete {
+                if let Some(duration) = trace.end_time.map(|e| e.0 - trace.start_time.0) {
+                    let _ = self.event_tx.send(TraceEvent::TraceCompleted {
+                        trace_id,
+                        duration_nanos: duration,
+                        span_count: trace.spans.len(),
+                    });
+                }
+            }
+
             self.traces.insert(trace_id, StoredTrace {
                 trace,
                 created_at: SystemTime::now(),
@@ -806,108 +1122,322 @@ impl TraceStore {
 }
 ```
 
-### 3.2 HTTP Server (`src/server.rs`)
+### 4.3 Service Implementation (`src/service_impl.rs`)
 
 ```rust
-use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::Json,
-    routing::{get, post},
-    Router,
-};
 use hindsight_protocol::*;
+use rapace::Streaming;
 use std::sync::Arc;
-use std::time::Duration;
+use futures::stream::Stream;
+use std::pin::Pin;
 
 use crate::storage::TraceStore;
 
-pub async fn run_server(host: &str, port: u16) -> anyhow::Result<()> {
-    let store = Arc::new(TraceStore::new(Duration::from_secs(3600))); // 1 hour TTL
-
-    let app = Router::new()
-        .route("/", get(serve_ui))
-        .route("/v1/traces", post(ingest_traces))
-        .route("/v1/traces/:trace_id", get(get_trace))
-        .route("/v1/traces", get(list_traces))
-        .with_state(store);
-
-    let addr = format!("{}:{}", host, port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    tracing::info!("🔍 Hindsight server listening on http://{}", addr);
-
-    axum::serve(listener, app).await?;
-    Ok(())
+pub struct HindsightServiceImpl {
+    store: Arc<TraceStore>,
 }
 
-async fn serve_ui() -> &'static str {
-    // TODO: Serve embedded HTML
-    "Hindsight UI coming soon!"
+impl HindsightServiceImpl {
+    pub fn new(store: Arc<TraceStore>) -> Self {
+        Self { store }
+    }
 }
 
-async fn ingest_traces(
-    State(store): State<Arc<TraceStore>>,
-    Json(req): Json<IngestRequest>,
-) -> Result<Json<IngestResponse>, StatusCode> {
-    let count = req.spans.len();
-    store.ingest(req.spans);
+#[rapace::async_trait]
+impl HindsightService for HindsightServiceImpl {
+    async fn ingest_spans(&self, spans: Vec<Span>) -> u32 {
+        // Filter out any spans from Hindsight itself (prevent infinite loop!)
+        let spans: Vec<_> = spans.into_iter()
+            .filter(|span| span.service_name != "hindsight-server")
+            .collect();
 
-    Ok(Json(IngestResponse { accepted: count }))
-}
+        self.store.ingest(spans)
+    }
 
-async fn get_trace(
-    State(store): State<Arc<TraceStore>>,
-    Path(trace_id): Path<String>,
-) -> Result<Json<Trace>, StatusCode> {
-    let trace_id = TraceId::from_hex(&trace_id)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    async fn get_trace(&self, trace_id: TraceId) -> Option<Trace> {
+        self.store.get_trace(trace_id)
+    }
 
-    store.get_trace(trace_id)
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
-}
+    async fn list_traces(&self, filter: TraceFilter) -> Vec<TraceSummary> {
+        self.store.list_traces(filter)
+    }
 
-async fn list_traces(
-    State(store): State<Arc<TraceStore>>,
-    Query(query): Query<ListTracesQuery>,
-) -> Json<Vec<Trace>> {
-    let traces = store.list_traces(
-        query.service.as_deref(),
-        query.limit.unwrap_or(100),
-    );
-    Json(traces)
+    async fn stream_traces(&self) -> Streaming<TraceEvent> {
+        let mut rx = self.store.subscribe_events();
+
+        let stream = async_stream::stream! {
+            while let Ok(event) = rx.recv().await {
+                yield Ok(event);
+            }
+        };
+
+        Box::pin(stream)
+    }
+
+    async fn ping(&self) -> String {
+        "pong".to_string()
+    }
 }
 ```
 
-### 3.3 Main Binary (`src/main.rs`)
-
-Update the placeholder to actually run the server:
+### 4.4 Main Server (`src/main.rs`)
 
 ```rust
-// ... (keep existing CLI code) ...
+mod storage;
+mod service_impl;
 
-match cli.command {
-    Commands::Serve { port, host } => {
-        println!("🔍 Hindsight server starting on http://{}:{}", host, port);
-        println!("   Web UI: http://{}:{}", host, port);
-        println!("   API: http://{}:{}/v1/traces", host, port);
+use axum::{response::Html, routing::get, Router};
+use clap::{Parser, Subcommand};
+use hindsight_protocol::*;
+use rapace::RpcSession;
+use rapace_transport_tcp::TcpTransport;
+use rapace_transport_websocket::WebSocketTransport;
+use std::sync::Arc;
+use std::time::Duration;
 
-        crate::server::run_server(&host, port).await?;
-        Ok(())
+use crate::service_impl::HindsightServiceImpl;
+use crate::storage::TraceStore;
+
+#[derive(Parser)]
+#[command(name = "hindsight")]
+#[command(about = "Distributed tracing made simple", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the trace collection server
+    Serve {
+        /// Port for Rapace TCP transport (for native clients)
+        #[arg(short, long, default_value = "9090")]
+        port: u16,
+
+        /// Port for WebSocket transport (for browser clients)
+        #[arg(short, long, default_value = "9091")]
+        ws_port: u16,
+
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// TTL for traces in seconds
+        #[arg(long, default_value = "3600")]
+        ttl: u64,
+    },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Serve { port, ws_port, host, ttl } => {
+            serve(host, port, ws_port, ttl).await
+        }
     }
+}
+
+async fn serve(host: String, port: u16, ws_port: u16, ttl_secs: u64) -> anyhow::Result<()> {
+    tracing::info!("🔍 Hindsight server starting");
+
+    let store = TraceStore::new(Duration::from_secs(ttl_secs));
+    let service = Arc::new(HindsightServiceImpl::new(store));
+
+    // Spawn TCP server (for native clients: TUI, apps, Rapace cells)
+    let service_tcp = service.clone();
+    tokio::spawn(async move {
+        if let Err(e) = serve_tcp(&host, port, service_tcp).await {
+            tracing::error!("TCP server error: {}", e);
+        }
+    });
+
+    // Spawn WebSocket server (for browser WASM clients)
+    let service_ws = service.clone();
+    tokio::spawn(async move {
+        if let Err(e) = serve_websocket(&host, ws_port, service_ws).await {
+            tracing::error!("WebSocket server error: {}", e);
+        }
+    });
+
+    // Serve minimal HTTP server (only for serving the WASM UI)
+    serve_http(&host, ws_port).await?;
+
+    Ok(())
+}
+
+/// Serve Rapace RPC over TCP (for native clients)
+async fn serve_tcp(
+    host: &str,
+    port: u16,
+    service: Arc<HindsightServiceImpl>,
+) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", host, port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    tracing::info!("📡 Rapace TCP server listening on {}", addr);
+
+    loop {
+        let (stream, peer_addr) = listener.accept().await?;
+        tracing::info!("New TCP connection from {}", peer_addr);
+
+        let service = service.clone();
+        tokio::spawn(async move {
+            let transport = Arc::new(TcpTransport::from_stream(stream));
+
+            // IMPORTANT: No tracer attached! (Prevents infinite loop)
+            let session = Arc::new(RpcSession::new(transport));
+
+            let server = HindsightServiceServer::new(service);
+            session.set_dispatcher(server);
+
+            if let Err(e) = session.run().await {
+                tracing::error!("Session error: {}", e);
+            }
+        });
+    }
+}
+
+/// Serve Rapace RPC over WebSocket (for browser WASM clients)
+async fn serve_websocket(
+    host: &str,
+    port: u16,
+    service: Arc<HindsightServiceImpl>,
+) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", host, port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    tracing::info!("🌐 WebSocket server listening on ws://{}", addr);
+
+    loop {
+        let (stream, peer_addr) = listener.accept().await?;
+
+        let service = service.clone();
+        tokio::spawn(async move {
+            // Accept WebSocket upgrade
+            let ws_stream = match tokio_tungstenite::accept_async(stream).await {
+                Ok(ws) => ws,
+                Err(e) => {
+                    tracing::error!("WebSocket upgrade failed: {}", e);
+                    return;
+                }
+            };
+
+            tracing::info!("New WebSocket connection from {}", peer_addr);
+
+            let transport = Arc::new(WebSocketTransport::new(ws_stream));
+
+            // IMPORTANT: No tracer attached! (Prevents infinite loop)
+            let session = Arc::new(RpcSession::new(transport));
+
+            let server = HindsightServiceServer::new(service);
+            session.set_dispatcher(server);
+
+            if let Err(e) = session.run().await {
+                tracing::error!("WebSocket session error: {}", e);
+            }
+        });
+    }
+}
+
+/// Serve static HTML (only for loading the WASM UI)
+async fn serve_http(host: &str, ws_port: u16) -> anyhow::Result<()> {
+    let app = Router::new()
+        .route("/", get(move || async move {
+            let html = include_str!("ui/index.html")
+                .replace("{{WS_PORT}}", &ws_port.to_string());
+            Html(html)
+        }));
+
+    let addr = format!("{}:8080", host);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    tracing::info!("🌍 Web UI available at http://{}", addr);
+
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 ```
 
 ---
 
-## Phase 4: Web UI
+## Phase 5: Web UI (WASM + Rapace)
 
-**Goal:** Beautiful browser-based trace visualization.
+**Goal:** Browser UI that uses Rapace WebSocket transport.
 
-**Location:** `crates/hindsight-server/src/ui/`
+**Crate:** `hindsight-ui` (new WASM crate)
 
-### 4.1 Embedded HTML (`src/ui/index.html`)
+### 5.1 Create New Crate
+
+```toml
+# crates/hindsight-ui/Cargo.toml
+[package]
+name = "hindsight-ui"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hindsight-protocol = { path = "../hindsight-protocol" }
+rapace = { path = "../../../rapace/crates/rapace" }
+rapace-transport-websocket = { path = "../../../rapace/crates/rapace-transport-websocket" }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement"] }
+facet = { path = "../../../facet" }
+```
+
+### 5.2 WASM Entry Point (`src/lib.rs`)
+
+```rust
+use wasm_bindgen::prelude::*;
+use hindsight_protocol::*;
+use rapace::RpcSession;
+use rapace_transport_websocket::WebSocketTransport;
+use std::sync::Arc;
+
+#[wasm_bindgen(start)]
+pub async fn main() {
+    // Connect to Hindsight via WebSocket
+    let ws_url = format!("ws://{}/ws", web_sys::window().unwrap().location().host().unwrap());
+
+    let transport = WebSocketTransport::connect(&ws_url).await
+        .expect("Failed to connect to Hindsight");
+
+    let session = Arc::new(RpcSession::new(Arc::new(transport)));
+    let client = HindsightServiceClient::new(session);
+
+    // Load initial traces
+    let traces = client.list_traces(TraceFilter::default()).await
+        .expect("Failed to list traces");
+
+    render_traces(&traces);
+
+    // Stream live updates
+    let mut stream = client.stream_traces().await
+        .expect("Failed to stream traces");
+
+    while let Some(event) = stream.recv().await {
+        handle_event(event);
+    }
+}
+
+fn render_traces(traces: &[TraceSummary]) {
+    // TODO: D3.js rendering (similar to Phase 4 from old plan)
+}
+
+fn handle_event(event: TraceEvent) {
+    // TODO: Update UI based on live events
+}
+```
+
+### 5.3 HTML Template (`src/ui/index.html` in hindsight-server)
 
 ```html
 <!DOCTYPE html>
@@ -916,117 +1446,14 @@ match cli.command {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hindsight - Distributed Tracing</title>
-    <script src="https://unpkg.com/d3@7"></script>
+    <script type="module">
+        import init from '/hindsight_ui.js';
+        init().then(() => {
+            console.log('Hindsight UI loaded');
+        });
+    </script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #0d1117;
-            color: #c9d1d9;
-        }
-        #app {
-            display: flex;
-            height: 100vh;
-        }
-        #sidebar {
-            width: 300px;
-            background: #161b22;
-            border-right: 1px solid #30363d;
-            padding: 20px;
-            overflow-y: auto;
-        }
-        #main {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-        }
-        #toolbar {
-            background: #161b22;
-            border-bottom: 1px solid #30363d;
-            padding: 15px 20px;
-            display: flex;
-            gap: 10px;
-        }
-        #trace-view {
-            flex: 1;
-            overflow: auto;
-            padding: 20px;
-        }
-
-        /* Trace list */
-        .trace-item {
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            padding: 12px;
-            margin-bottom: 10px;
-            cursor: pointer;
-            transition: border-color 0.2s;
-        }
-        .trace-item:hover {
-            border-color: #58a6ff;
-        }
-        .trace-id {
-            font-family: monospace;
-            font-size: 11px;
-            color: #8b949e;
-        }
-        .trace-duration {
-            font-weight: 600;
-            color: #58a6ff;
-        }
-
-        /* Waterfall view */
-        .waterfall {
-            position: relative;
-        }
-        .span-row {
-            display: flex;
-            align-items: center;
-            padding: 4px 0;
-            border-bottom: 1px solid #21262d;
-        }
-        .span-label {
-            width: 200px;
-            font-size: 12px;
-            padding-left: var(--indent);
-        }
-        .span-timeline {
-            flex: 1;
-            height: 24px;
-            position: relative;
-        }
-        .span-bar {
-            position: absolute;
-            height: 18px;
-            background: #58a6ff;
-            border-radius: 3px;
-            top: 3px;
-        }
-        .span-bar.error {
-            background: #f85149;
-        }
-        .span-duration {
-            position: absolute;
-            font-size: 11px;
-            color: #fff;
-            padding: 0 6px;
-            line-height: 18px;
-        }
-
-        /* Button */
-        button {
-            background: #238636;
-            color: #fff;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-        }
-        button:hover {
-            background: #2ea043;
-        }
+        /* Styling from old plan */
     </style>
 </head>
 <body>
@@ -1037,230 +1464,76 @@ match cli.command {
         </div>
         <div id="main">
             <div id="toolbar">
-                <button onclick="refreshTraces()">Refresh</button>
-                <span id="status">Loading...</span>
+                <span id="status">Connecting...</span>
             </div>
             <div id="trace-view"></div>
         </div>
     </div>
-
-    <script>
-        // State
-        let traces = [];
-        let selectedTrace = null;
-
-        // Load traces
-        async function refreshTraces() {
-            document.getElementById('status').textContent = 'Loading...';
-            const res = await fetch('/v1/traces?limit=50');
-            traces = await res.json();
-            renderTraceList();
-            document.getElementById('status').textContent = `${traces.length} traces`;
-        }
-
-        // Render trace list
-        function renderTraceList() {
-            const list = document.getElementById('trace-list');
-            list.innerHTML = traces.map(trace => `
-                <div class="trace-item" onclick="selectTrace('${trace.trace_id}')">
-                    <div class="trace-id">${trace.trace_id}</div>
-                    <div>
-                        <span class="trace-duration">${formatDuration(trace.end_time - trace.start_time)}</span>
-                        ${trace.spans.length} spans
-                    </div>
-                </div>
-            `).join('');
-        }
-
-        // Select and render trace
-        async function selectTrace(traceId) {
-            const res = await fetch(`/v1/traces/${traceId}`);
-            selectedTrace = await res.json();
-            renderTraceWaterfall();
-        }
-
-        // Render waterfall
-        function renderTraceWaterfall() {
-            if (!selectedTrace) return;
-
-            const view = document.getElementById('trace-view');
-            const startTime = selectedTrace.start_time;
-            const endTime = selectedTrace.end_time || Date.now() * 1e6;
-            const totalDuration = endTime - startTime;
-
-            // Build tree
-            const tree = buildSpanTree(selectedTrace);
-
-            view.innerHTML = `
-                <h3>Trace ${selectedTrace.trace_id.substring(0, 16)}...</h3>
-                <div class="waterfall">
-                    ${renderSpanTree(tree, 0, startTime, totalDuration)}
-                </div>
-            `;
-        }
-
-        function buildSpanTree(trace) {
-            const spanMap = new Map(trace.spans.map(s => [s.span_id, s]));
-            const root = trace.spans.find(s => s.span_id === trace.root_span_id);
-
-            function buildNode(span) {
-                const children = trace.spans
-                    .filter(s => s.parent_span_id === span.span_id)
-                    .map(buildNode);
-                return { span, children };
-            }
-
-            return buildNode(root);
-        }
-
-        function renderSpanTree(node, depth, traceStart, totalDuration) {
-            const span = node.span;
-            const start = span.start_time - traceStart;
-            const duration = (span.end_time || Date.now() * 1e6) - span.start_time;
-            const left = (start / totalDuration) * 100;
-            const width = (duration / totalDuration) * 100;
-
-            const errorClass = span.status.type === 'Error' ? 'error' : '';
-
-            const html = `
-                <div class="span-row">
-                    <div class="span-label" style="--indent: ${depth * 20}px">
-                        ${span.name}
-                    </div>
-                    <div class="span-timeline">
-                        <div class="span-bar ${errorClass}" style="left: ${left}%; width: ${width}%">
-                            <span class="span-duration">${formatDuration(duration)}</span>
-                        </div>
-                    </div>
-                </div>
-            `;
-
-            return html + node.children.map(child => renderSpanTree(child, depth + 1, traceStart, totalDuration)).join('');
-        }
-
-        function formatDuration(nanos) {
-            if (nanos < 1000) return `${nanos}ns`;
-            if (nanos < 1e6) return `${(nanos / 1000).toFixed(1)}µs`;
-            if (nanos < 1e9) return `${(nanos / 1e6).toFixed(1)}ms`;
-            return `${(nanos / 1e9).toFixed(2)}s`;
-        }
-
-        // Initial load
-        refreshTraces();
-        setInterval(refreshTraces, 5000); // Auto-refresh every 5s
-    </script>
 </body>
 </html>
 ```
 
-### 4.2 Serve UI (`src/server.rs`)
-
-Update `serve_ui` function:
-
-```rust
-async fn serve_ui() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("ui/index.html"))
-}
-```
+**Note:** Full WASM implementation is beyond the scope of this plan, but the architecture is established.
 
 ---
 
-## Phase 5: TUI
+## Phase 6: TUI (Native Rapace)
 
-**Goal:** Terminal UI for SSH-friendly trace viewing.
+**Goal:** Terminal UI using native Rapace TCP transport.
 
 **Crate:** `hindsight-tui`
 
-### 5.1 Main TUI App (`src/app.rs`)
+### 6.1 Main App (`src/app.rs`)
 
 ```rust
 use crossterm::event::{self, Event, KeyCode};
 use hindsight_protocol::*;
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
-    Terminal,
-};
-use std::io;
+use rapace::RpcSession;
+use rapace_transport_tcp::TcpTransport;
+use ratatui::{/* ... */};
+use std::sync::Arc;
 
 pub struct App {
-    server_url: String,
-    traces: Vec<Trace>,
+    client: HindsightServiceClient,
+    traces: Vec<TraceSummary>,
     selected_index: usize,
     selected_trace: Option<Trace>,
 }
 
 impl App {
-    pub fn new(server_url: String) -> Self {
-        Self {
-            server_url,
+    pub async fn new(server_addr: String) -> anyhow::Result<Self> {
+        // Connect via TCP (not HTTP!)
+        let transport = TcpTransport::connect(&server_addr).await?;
+        let session = Arc::new(RpcSession::new(Arc::new(transport)));
+
+        // IMPORTANT: No tracer attached! (TUI doesn't trace itself)
+        let client = HindsightServiceClient::new(session);
+
+        Ok(Self {
+            client,
             traces: Vec::new(),
             selected_index: 0,
             selected_trace: None,
-        }
+        })
     }
 
-    pub async fn run(&mut self) -> io::Result<()> {
+    pub async fn run(&mut self) -> anyhow::Result<()> {
         // Setup terminal
-        crossterm::terminal::enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
+        // ... (same as old plan)
 
-        // Fetch initial data
+        // Fetch initial data using Rapace RPC!
         self.refresh().await?;
 
         // Event loop
-        loop {
-            terminal.draw(|f| self.ui(f))?;
-
-            if event::poll(std::time::Duration::from_millis(200))? {
-                if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('r') => {
-                            self.refresh().await?;
-                        }
-                        KeyCode::Up => {
-                            if self.selected_index > 0 {
-                                self.selected_index -= 1;
-                                self.select_current_trace().await?;
-                            }
-                        }
-                        KeyCode::Down => {
-                            if self.selected_index < self.traces.len() - 1 {
-                                self.selected_index += 1;
-                                self.select_current_trace().await?;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // Cleanup terminal
-        crossterm::terminal::disable_raw_mode()?;
-        crossterm::execute!(
-            terminal.backend_mut(),
-            crossterm::terminal::LeaveAlternateScreen
-        )?;
-
-        Ok(())
+        // ... (same as old plan)
     }
 
-    async fn refresh(&mut self) -> io::Result<()> {
-        let url = format!("{}/v1/traces?limit=50", self.server_url);
-        self.traces = reqwest::get(&url)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-            .json()
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    async fn refresh(&mut self) -> anyhow::Result<()> {
+        // Use Rapace RPC instead of HTTP!
+        self.traces = self.client.list_traces(TraceFilter {
+            limit: Some(50),
+            ..Default::default()
+        }).await?;
 
         if !self.traces.is_empty() {
             self.select_current_trace().await?;
@@ -1269,155 +1542,65 @@ impl App {
         Ok(())
     }
 
-    async fn select_current_trace(&mut self) -> io::Result<()> {
-        if let Some(trace) = self.traces.get(self.selected_index) {
-            let url = format!("{}/v1/traces/{}", self.server_url, trace.trace_id);
-            self.selected_trace = Some(
-                reqwest::get(&url)
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-                    .json()
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-            );
+    async fn select_current_trace(&mut self) -> anyhow::Result<()> {
+        if let Some(summary) = self.traces.get(self.selected_index) {
+            // Use Rapace RPC instead of HTTP!
+            self.selected_trace = self.client.get_trace(summary.trace_id).await?;
         }
         Ok(())
     }
 
-    fn ui(&self, f: &mut ratatui::Frame) {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(f.size());
-
-        // Trace list (left panel)
-        let items: Vec<ListItem> = self
-            .traces
-            .iter()
-            .enumerate()
-            .map(|(i, trace)| {
-                let duration = trace.end_time.map(|e| e.0 - trace.start_time.0).unwrap_or(0);
-                let text = format!(
-                    "{} | {} | {} spans",
-                    &trace.trace_id.to_string()[0..8],
-                    format_duration(duration),
-                    trace.spans.len()
-                );
-                let style = if i == self.selected_index {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(text).style(style)
-            })
-            .collect();
-
-        let list = List::new(items)
-            .block(Block::default().title("Traces (↑/↓ to select, r to refresh, q to quit)").borders(Borders::ALL));
-
-        f.render_widget(list, chunks[0]);
-
-        // Trace details (right panel)
-        if let Some(trace) = &self.selected_trace {
-            let lines: Vec<Line> = trace
-                .spans
-                .iter()
-                .map(|span| {
-                    let indent = "  ".repeat(self.calculate_depth(trace, span.span_id));
-                    let duration = span.end_time.map(|e| e.0 - span.start_time.0).unwrap_or(0);
-                    Line::from(vec![
-                        Span::raw(indent),
-                        Span::styled(&span.name, Style::default().fg(Color::Cyan)),
-                        Span::raw(" "),
-                        Span::styled(format_duration(duration), Style::default().fg(Color::Green)),
-                    ])
-                })
-                .collect();
-
-            let paragraph = Paragraph::new(lines)
-                .block(Block::default().title("Trace Details").borders(Borders::ALL));
-
-            f.render_widget(paragraph, chunks[1]);
-        }
-    }
-
-    fn calculate_depth(&self, trace: &Trace, span_id: SpanId) -> usize {
-        let span = trace.spans.iter().find(|s| s.span_id == span_id).unwrap();
-        if let Some(parent_id) = span.parent_span_id {
-            1 + self.calculate_depth(trace, parent_id)
-        } else {
-            0
-        }
-    }
-}
-
-fn format_duration(nanos: u64) -> String {
-    if nanos < 1000 {
-        format!("{}ns", nanos)
-    } else if nanos < 1_000_000 {
-        format!("{:.1}µs", nanos as f64 / 1000.0)
-    } else if nanos < 1_000_000_000 {
-        format!("{:.1}ms", nanos as f64 / 1_000_000.0)
-    } else {
-        format!("{:.2}s", nanos as f64 / 1_000_000_000.0)
-    }
-}
-```
-
-### 5.2 Main Binary (`src/main.rs`)
-
-Update to run the TUI:
-
-```rust
-mod app;
-
-use clap::Parser;
-
-#[derive(Parser)]
-#[command(name = "hindsight-tui")]
-#[command(about = "Terminal UI for Hindsight distributed tracing", long_about = None)]
-struct Cli {
-    /// Hindsight server address
-    #[arg(short, long, default_value = "http://localhost:9090")]
-    connect: String,
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    let mut app = app::App::new(cli.connect);
-    app.run().await?;
-
-    Ok(())
+    // ... (rest of TUI implementation from old plan)
 }
 ```
 
 ---
 
-## Phase 6: Integrations
+## Phase 7: Integrations
 
-### 6.1 Rapace Integration
+### 7.1 Rapace Integration
 
-**Location:** `rapace-core/src/tracing_support.rs` (new file, feature-gated)
+**Location:** `rapace-core/src/tracing.rs` (new file, feature-gated)
 
 ```rust
 #[cfg(feature = "hindsight")]
 use hindsight::{Tracer, ActiveSpan};
 
+pub struct TracingContext {
+    tracer: Tracer,
+    service_name: String,
+}
+
 impl<T: Transport> RpcSession<T> {
+    /// Attach a Hindsight tracer to this session
+    ///
+    /// ⚠️ WARNING: Do NOT use this on Hindsight's own RPC sessions!
+    /// This will cause infinite loops.
+    ///
+    /// Only use this on application-level sessions.
     #[cfg(feature = "hindsight")]
-    pub fn with_tracer(mut self, tracer: Tracer) -> Self {
-        self.tracer = Some(tracer);
+    pub fn with_hindsight_tracer(mut self, tracer: Tracer) -> Self {
+        self.tracing_context = Some(TracingContext {
+            tracer,
+            service_name: std::env::var("SERVICE_NAME")
+                .unwrap_or_else(|_| "rapace-app".to_string()),
+        });
         self
     }
 
-    // In call() method, wrap with span:
-    pub async fn call(&self, channel_id: u32, method_id: u32, payload: Bytes) -> Result<ReceivedFrame, RpcError> {
+    // In call() method:
+    pub async fn call(&self, channel_id: u32, method_id: u32, payload: Bytes)
+        -> Result<ReceivedFrame, RpcError>
+    {
         #[cfg(feature = "hindsight")]
-        let span = if let Some(tracer) = &self.tracer {
-            Some(tracer.span(format!("RPC: method_{}", method_id))
+        let _span = if let Some(ctx) = &self.tracing_context {
+            let method_name = self.method_registry
+                .lookup(method_id)
+                .unwrap_or_else(|| format!("method_{}", method_id));
+
+            Some(ctx.tracer.span(format!("RPC: {}", method_name))
                 .with_attribute("channel_id", channel_id as i64)
+                .with_attribute("method_id", method_id as i64)
                 .start())
         } else {
             None
@@ -1426,7 +1609,10 @@ impl<T: Transport> RpcSession<T> {
         // ... existing call logic ...
 
         #[cfg(feature = "hindsight")]
-        if let Some(span) = span {
+        if let Some(span) = _span {
+            if result.is_err() {
+                span.set_error(format!("{:?}", result));
+            }
             span.end();
         }
 
@@ -1435,28 +1621,52 @@ impl<T: Transport> RpcSession<T> {
 }
 ```
 
-### 6.2 Picante Integration
+**Usage:**
+```rust
+// Application code (NOT Hindsight itself!)
+let tracer = hindsight::Tracer::new(tcp_transport).await?;
+
+let session = RpcSession::new(app_transport)
+    .with_hindsight_tracer(tracer); // ✅ OK for application sessions
+
+// ❌ DON'T do this in Hindsight server:
+// let session = RpcSession::new(transport)
+//     .with_hindsight_tracer(tracer); // ❌ INFINITE LOOP!
+```
+
+### 7.2 Picante Integration
 
 **Location:** `picante/src/runtime.rs`
 
 ```rust
 impl Runtime {
     #[cfg(feature = "hindsight")]
-    pub fn with_tracer(mut self, tracer: hindsight::Tracer) -> Self {
-        self.tracer = Some(tracer);
+    pub fn with_hindsight_tracer(mut self, tracer: hindsight::Tracer) -> Self {
+        self.hindsight_tracer = Some(tracer);
         self
     }
 }
 
-// In query execution, emit spans
+// In query execution:
 #[cfg(feature = "hindsight")]
-if let Some(tracer) = &db.runtime().tracer {
-    let span = tracer.span(format!("Query: {}", query_name))
+if let Some(tracer) = &db.runtime().hindsight_tracer {
+    let _span = tracer.span(format!("Query: {}", query_kind_name))
         .with_attribute("cache_hit", cache_hit)
+        .with_attribute("revision", revision as i64)
         .start();
-    // ... execution ...
-    span.end();
+
+    // ... execute query ...
+
+    _span.end(); // Sends to Hindsight
 }
+```
+
+**Usage:**
+```rust
+let tracer = hindsight::Tracer::new(tcp_transport).await?;
+
+let runtime = Runtime::new()
+    .with_hindsight_tracer(tracer); // ✅ Traces all query executions
 ```
 
 ---
@@ -1466,64 +1676,126 @@ if let Some(tracer) = &db.runtime().tracer {
 ### Unit Tests
 - `hindsight-protocol`: Trace context parsing, span serialization
 - `hindsight`: Span builder API, batching logic
-- `hindsight-server`: Storage, TTL cleanup
+- `hindsight-server`: Storage, TTL cleanup, event broadcasting
 
 ### Integration Tests
+
 ```rust
 #[tokio::test]
-async fn test_end_to_end_trace() {
-    // Start server
-    let server = start_test_server().await;
+async fn test_end_to_end_rapace_trace() {
+    // Start Hindsight server
+    let store = TraceStore::new(Duration::from_secs(3600));
+    let service = Arc::new(HindsightServiceImpl::new(store));
 
-    // Send spans via client
-    let tracer = Tracer::connect(server.url()).await.unwrap();
-    let span = tracer.span("test").start();
+    // Create in-memory transport (for testing)
+    let (client_transport, server_transport) = create_test_transport_pair();
+
+    // Server side
+    let session = Arc::new(RpcSession::new(server_transport));
+    session.set_dispatcher(HindsightServiceServer::new(service.clone()));
+    tokio::spawn(session.run());
+
+    // Client side
+    let tracer = Tracer::new(client_transport).await.unwrap();
+
+    // Send a span
+    let span = tracer.span("test_operation").start();
     span.end();
 
-    // Wait for batch send
+    // Wait for batching
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Query trace
-    let traces = server.list_traces().await;
+    // Query via Rapace RPC (not HTTP!)
+    let client = HindsightServiceClient::new(session.clone());
+    let traces = client.list_traces(TraceFilter::default()).await.unwrap();
+
     assert_eq!(traces.len(), 1);
+    assert_eq!(traces[0].root_span_name, "test_operation");
 }
 ```
 
 ### Manual Testing
-1. Run server: `cargo run -p hindsight-server -- serve`
-2. Run example app that sends spans
-3. View in browser at http://localhost:9090
-4. Run TUI: `cargo run -p hindsight-tui`
+
+1. **Start server:**
+   ```bash
+   cargo run -p hindsight-server -- serve
+   ```
+
+2. **Run TUI:**
+   ```bash
+   cargo run -p hindsight-tui -- --connect tcp://localhost:9090
+   ```
+
+3. **Run example app:**
+   ```bash
+   cargo run --example traced-app
+   ```
+
+4. **Open browser:**
+   ```
+   http://localhost:8080
+   ```
 
 ---
 
 ## Future Enhancements
 
 1. **Persistent Storage**
-   - SQLite backend for long-term trace storage
-   - Export to Parquet for analysis
+   - SQLite backend for long-term storage
+   - Configurable via `--storage=sqlite://traces.db`
 
 2. **Sampling**
-   - Configurable sampling rate (e.g., 1% of traces)
+   - Server-side sampling (% of traces)
    - Head-based and tail-based sampling
 
-3. **Advanced UI**
-   - Flamegraph view
-   - Service dependency graph
-   - Latency histograms
-
-4. **Export Formats**
+3. **Export Formats**
    - Jaeger format
    - Zipkin format
    - OpenTelemetry OTLP
 
-5. **Rapace RPC Ingestion**
-   - Alternative to HTTP for lower overhead
-   - Bi-directional streaming
+4. **Advanced Filtering**
+   - Query by span attributes
+   - Full-text search in span names
 
-6. **Alerting**
-   - Threshold-based alerts (latency, error rate)
+5. **Alerting**
+   - Threshold-based alerts (latency > X, error rate > Y)
    - Webhook notifications
+
+6. **SHM Transport**
+   - For ultra-low-latency same-machine tracing
+   - Perfect for Picante → Hindsight on dev machines
+
+---
+
+## Avoiding Infinite Loops - Summary
+
+### The Rule
+
+**Hindsight's own RPC sessions MUST NOT have a tracer attached.**
+
+### How to Ensure This
+
+1. **In Hindsight server:** Never call `.with_hindsight_tracer()` on sessions
+2. **In applications:** Only trace application-level sessions, not Hindsight client sessions
+3. **Service filtering:** Filter out `HindsightService` from tracing
+4. **Server-side filtering:** Hindsight rejects spans with `service_name == "hindsight-server"`
+
+### Example (Correct)
+
+```rust
+// Application that uses both Hindsight (for tracing) AND Rapace (for business logic)
+
+// Tracer for sending spans (uses one Rapace session internally)
+let hindsight_transport = TcpTransport::connect("localhost:9090").await?;
+let tracer = Tracer::new(hindsight_transport).await?; // ✅ No tracer on this!
+
+// Application RPC session (traced)
+let app_transport = TcpTransport::connect("localhost:5000").await?;
+let app_session = RpcSession::new(app_transport)
+    .with_hindsight_tracer(tracer); // ✅ Traces business logic RPCs
+
+// Use app_session normally - all RPCs will be traced!
+```
 
 ---
 
@@ -1534,10 +1806,11 @@ async fn test_end_to_end_trace() {
 - [x] `.gitignore`
 - [x] `LICENSE-MIT`, `LICENSE-APACHE`
 - [x] `.github/workflows/ci.yml`
-- [x] `crates/hindsight-protocol/` (complete implementation needed)
-- [x] `crates/hindsight/` (complete implementation needed)
-- [x] `crates/hindsight-server/` (complete implementation needed)
-- [x] `crates/hindsight-tui/` (complete implementation needed)
+- [x] `crates/hindsight-protocol/` - Protocol, service definition
+- [x] `crates/hindsight/` - Client library
+- [x] `crates/hindsight-server/` - Server implementation
+- [x] `crates/hindsight-tui/` - TUI client
+- [ ] `crates/hindsight-ui/` - WASM web UI (to be created)
 - [x] `PLAN.md`
 
 ---
@@ -1545,11 +1818,15 @@ async fn test_end_to_end_trace() {
 ## Getting Started (For New Contributors)
 
 1. **Read the README** to understand the project vision
-2. **Start with Phase 1** (protocol) - it's the foundation
-3. **Run the tests** as you implement each phase
-4. **Build incrementally** - get each phase working before moving to the next
-5. **Ask questions** if anything is unclear!
+2. **Understand the "Avoiding Infinite Loops" section** - this is critical!
+3. **Start with Phase 1** (protocol) - foundation for everything
+4. **Phase 2** (Rapace service definition) - defines the RPC interface
+5. **Phase 3** (client library) - test with simple examples
+6. **Phase 4** (server) - get it serving via TCP and WebSocket
+7. **Phase 5-6** (UI) - polish the visualization
 
-The goal is to have a working MVP by the end of Phase 3, with UI polish in Phases 4-5.
+The goal is a working MVP by the end of Phase 4, with UI in Phases 5-6.
+
+**Key Principle:** Everything uses Rapace RPC. No HTTP APIs except serving the HTML page.
 
 Happy hacking! 🚀

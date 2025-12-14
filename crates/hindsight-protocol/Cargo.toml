@@ -8,6 +8,9 @@ authors.workspace = true
 description = "Protocol definitions for Hindsight distributed tracing"
 
 [dependencies]
+facet.workspace = true
+rapace.workspace = true
+
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
