@@ -5,7 +5,9 @@
 pub mod trace_context;
 pub mod span;
 pub mod events;
+pub mod service;
 
 pub use trace_context::*;
 pub use span::*;
 pub use events::*;
+pub use service::*;

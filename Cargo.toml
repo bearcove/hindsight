@@ -16,7 +16,7 @@ authors = ["Amos Wenger <amos@bearcove.net>"]
 
 [workspace.dependencies]
 # Bearcove ecosystem
-facet = { path = "../facet/facet" }
+facet = "0.32"
 rapace = { path = "../rapace/crates/rapace" }
 
 # Async runtime
