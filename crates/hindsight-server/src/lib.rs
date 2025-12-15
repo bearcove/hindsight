@@ -123,7 +123,7 @@ async fn handle_root(
 
     match upgrade.as_deref() {
         Some("websocket") => {
-            // WebSocket upgrade
+            // WebSocket upgrade - use axum's upgrade handler
             if let Some(ws) = ws {
                 ws.on_upgrade(move |socket| handle_websocket(socket, service))
                     .into_response()
@@ -143,75 +143,20 @@ async fn handle_root(
     }
 }
 
-/// Handle WebSocket upgrade (for browser clients speaking Rapace!)
+/// Handle WebSocket connections from browser (using Rapace AxumTransport)
 async fn handle_websocket(
-    mut socket: axum::extract::ws::WebSocket,
+    socket: axum::extract::ws::WebSocket,
     service: Arc<HindsightServiceImpl>,
 ) {
-    use axum::extract::ws::Message;
-
     tracing::info!("New WebSocket Rapace connection from browser");
 
-    while let Some(msg) = socket.recv().await {
-        match msg {
-            Ok(Message::Binary(data)) => {
-                // Got a Rapace RPC frame!
-                // Format: [descriptor (8 bytes)][payload]
-                if data.len() < 8 {
-                    tracing::warn!("Invalid Rapace frame: too short");
-                    continue;
-                }
+    // Use Rapace's AxumTransport - now supports axum WebSocket directly!
+    let transport = Arc::new(rapace_transport_websocket::AxumTransport::new(socket));
+    let server = HindsightServiceServer::new(service.as_ref().clone());
 
-                // Parse descriptor
-                let desc_bytes: [u8; 8] = data[0..8].try_into().unwrap();
-                let descriptor = u64::from_le_bytes(desc_bytes);
-
-                let channel_id = (descriptor & 0xFFFFFFFF) as u32;
-                let method_id = ((descriptor >> 32) & 0xFFFFFFFF) as u32;
-
-                let payload = &data[8..];
-
-                tracing::debug!("Received Rapace RPC: channel={}, method={}, payload_len={}",
-                    channel_id, method_id, payload.len());
-
-                // Dispatch to HindsightService
-                let server = HindsightServiceServer::new(service.as_ref().clone());
-                match server.dispatch(method_id, payload).await {
-                    Ok(response) => {
-                        // Send response back as Rapace frame
-                        let response_payload = response.payload();
-                        let mut frame = Vec::with_capacity(8 + response_payload.len());
-                        frame.extend_from_slice(&descriptor.to_le_bytes());
-                        frame.extend_from_slice(response_payload);
-
-                        if let Err(e) = socket.send(Message::Binary(frame)).await {
-                            tracing::error!("Failed to send WebSocket response: {}", e);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("RPC dispatch error: {:?}", e);
-                        // Send error response
-                        let error_payload = format!("Error: {:?}", e).into_bytes();
-                        let mut frame = Vec::with_capacity(8 + error_payload.len());
-                        frame.extend_from_slice(&descriptor.to_le_bytes());
-                        frame.extend_from_slice(&error_payload);
-                        let _ = socket.send(Message::Binary(frame)).await;
-                    }
-                }
-            }
-            Ok(Message::Close(_)) => {
-                tracing::info!("WebSocket closed by client");
-                break;
-            }
-            Ok(_) => {
-                // Ignore non-binary messages
-            }
-            Err(e) => {
-                tracing::error!("WebSocket error: {}", e);
-                break;
-            }
-        }
+    // Serve using Rapace's built-in serve method
+    if let Err(e) = server.serve(transport).await {
+        tracing::error!("WebSocket Rapace session error: {:?}", e);
     }
 
     tracing::info!("WebSocket Rapace connection closed");

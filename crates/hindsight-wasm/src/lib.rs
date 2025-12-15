@@ -20,7 +20,10 @@ use components::*;
 pub fn main() {
     console_error_panic_hook::set_once();
 
-    web_sys::console::log_1(&"🔍 Hindsight WASM starting...".into());
+    // Initialize tracing-wasm to send Rust logs to browser console
+    tracing_wasm::set_as_global_default();
+
+    tracing::info!("🔍 Hindsight WASM starting...");
 
     sycamore::render(|| view! { App {} });
 }
@@ -51,22 +54,29 @@ fn App() -> View {
     spawn_local(async move {
         match init_client().await {
             Ok(client) => {
-                web_sys::console::log_1(&"✅ Connected to Hindsight via Rapace!".into());
+                tracing::info!("✅ Connected to Hindsight via Rapace!");
                 connected.set(true);
                 connection_status.set("Connected".to_string());
 
                 // Load initial traces
-                if let Ok(trace_list) = client.list_traces(TraceFilter::default()).await {
-                    total_traces.set(trace_list.len());
-                    shown_traces.set(trace_list.len());
-                    traces.set(trace_list.clone());
-                    filtered_traces.set(trace_list);
+                tracing::info!("Requesting trace list with default filter...");
+                match client.list_traces(TraceFilter::default()).await {
+                    Ok(trace_list) => {
+                        tracing::info!("✅ Received {} traces", trace_list.len());
+                        total_traces.set(trace_list.len());
+                        shown_traces.set(trace_list.len());
+                        traces.set(trace_list.clone());
+                        filtered_traces.set(trace_list);
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to list traces: {:?}", e);
+                    }
                 }
 
                 // TODO: Store client for future use
             }
             Err(e) => {
-                web_sys::console::error_1(&format!("❌ Failed to connect: {:?}", e).into());
+                tracing::error!("❌ Failed to connect: {:?}", e);
                 connection_status.set("Disconnected".to_string());
             }
         }
@@ -155,24 +165,30 @@ async fn init_client() -> Result<HindsightServiceClient<WebSocketTransport>, Str
 
     let url = format!("{}//{}/", protocol, host);
 
-    web_sys::console::log_1(&format!("Connecting to {}", url).into());
+    tracing::info!("Connecting to {}", url);
 
     let transport = WebSocketTransport::connect(&url)
         .await
         .map_err(|e| format!("Transport error: {:?}", e))?;
 
+    tracing::debug!("WebSocket transport connected");
+
     let transport = Arc::new(transport);
     let session = Arc::new(RpcSession::with_channel_start(transport.clone(), 2));
+
+    tracing::debug!("RPC session created with channel_start=2");
 
     // Keep session running
     let session_clone = session.clone();
     spawn_local(async move {
+        tracing::debug!("Starting RPC session run loop");
         if let Err(e) = session_clone.run().await {
-            web_sys::console::error_1(&format!("Session error: {:?}", e).into());
+            tracing::error!("Session error: {:?}", e);
         }
     });
 
     let client = HindsightServiceClient::new(session);
+    tracing::debug!("HindsightServiceClient created");
 
     Ok(client)
 }

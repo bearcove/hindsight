@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 hindsight-protocol = { path = "../hindsight-protocol" }
 rapace.workspace = true
+rapace-transport-websocket = { path = "../../../rapace/crates/rapace-transport-websocket", features = ["axum"] }
 
 tokio.workspace = true
 async-stream = "0.3"
