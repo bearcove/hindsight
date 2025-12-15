@@ -22,7 +22,8 @@ rapace-transport-websocket = { path = "../../../rapace/crates/rapace-transport-w
 
 tokio.workspace = true
 async-stream = "0.3"
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.28"
+tower = "0.4"
 
 # HTTP server (only for serving static HTML)
 axum.workspace = true

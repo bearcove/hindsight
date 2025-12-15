@@ -2,7 +2,7 @@ mod storage;
 mod service_impl;
 
 use axum::{
-    extract::{Request, WebSocketUpgrade},
+    extract::Request,
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -14,6 +14,7 @@ use hyper_util::rt::TokioIo;
 use rapace::RpcSession;
 use std::sync::Arc;
 use std::time::Duration;
+use tower::Service;
 
 use crate::service_impl::HindsightServiceImpl;
 use crate::storage::TraceStore;
@@ -89,29 +90,71 @@ async fn serve_http_unified(
     let app = Router::new()
         .route("/", get({
             let service = service.clone();
-            move |headers: HeaderMap, ws: Option<WebSocketUpgrade>, req: Request| {
-                handle_root(headers, ws, req, service.clone())
+            move |headers: HeaderMap, req: Request| {
+                handle_root(headers, req, service.clone())
             }
         }))
         .route("/pkg/*file", get(serve_pkg_file))
-        .with_state(service);
+        .with_state(service.clone());
 
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    tracing::info!("🌐 Unified server listening on http://{}", addr);
+    tracing::info!("🌐 Unified server listening on {}", addr);
     tracing::info!("  - HTTP GET / → Web UI");
-    tracing::info!("  - Upgrade: websocket → WebSocket (for WASM clients)");
-    tracing::info!("  - Upgrade: rapace → Raw Rapace TCP (for native clients)");
+    tracing::info!("  - WebSocket upgrade → WebSocket Rapace (for WASM clients)");
+    tracing::info!("  - HTTP Upgrade: rapace → Rapace over HTTP upgrade");
+    tracing::info!("  - Raw binary → Direct Rapace TCP (for native clients)");
 
-    axum::serve(listener, app).await?;
-    Ok(())
+    // Handle connections manually to intercept WebSocket at TCP level
+    loop {
+        let (tcp_stream, peer_addr) = listener.accept().await?;
+        let service = service.clone();
+        let app = app.clone();
+
+        tokio::spawn(async move {
+            // Peek at the first bytes to detect connection type
+            let mut peek_buf = [0u8; 1024];
+            match tcp_stream.peek(&mut peek_buf).await {
+                Ok(n) if n > 0 => {
+                    let peek_str = String::from_utf8_lossy(&peek_buf[..n]);
+
+                    if peek_str.contains("Upgrade: websocket") {
+                        tracing::info!("Detected WebSocket upgrade from {}, handling with tokio-tungstenite", peer_addr);
+                        handle_websocket_tcp(tcp_stream, service).await;
+                    } else if peek_str.starts_with("GET ") || peek_str.starts_with("POST ") ||
+                              peek_str.starts_with("PUT ") || peek_str.starts_with("DELETE ") ||
+                              peek_str.starts_with("HEAD ") || peek_str.starts_with("OPTIONS ") {
+                        // HTTP request - handle with axum
+                        tracing::info!("Detected HTTP request from {}", peer_addr);
+                        let tower_service = app.into_service();
+                        let hyper_service = hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                            tower_service.clone().call(request)
+                        });
+
+                        if let Err(e) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(TokioIo::new(tcp_stream), hyper_service)
+                            .await
+                        {
+                            tracing::error!("HTTP connection error: {}", e);
+                        }
+                    } else {
+                        // Raw binary Rapace protocol (no HTTP)
+                        tracing::info!("Detected raw Rapace binary connection from {}", peer_addr);
+                        handle_rapace_tcp(tcp_stream, service).await;
+                    }
+                }
+                _ => {
+                    tracing::warn!("Failed to peek TCP stream from {}", peer_addr);
+                }
+            }
+        });
+    }
 }
 
 /// Handle requests to "/" - detect upgrade type or serve HTML
 async fn handle_root(
     headers: HeaderMap,
-    ws: Option<WebSocketUpgrade>,
     req: Request,
     service: Arc<HindsightServiceImpl>,
 ) -> Response {
@@ -123,13 +166,10 @@ async fn handle_root(
 
     match upgrade.as_deref() {
         Some("websocket") => {
-            // WebSocket upgrade - use axum's upgrade handler
-            if let Some(ws) = ws {
-                ws.on_upgrade(move |socket| handle_websocket(socket, service))
-                    .into_response()
-            } else {
-                (StatusCode::BAD_REQUEST, "WebSocket upgrade failed").into_response()
-            }
+            // WebSocket is now intercepted at TCP level before reaching here
+            // This should never happen, but return error just in case
+            tracing::error!("WebSocket upgrade reached handle_root - should be intercepted at TCP level");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Some("rapace") => {
             // Rapace upgrade - manual handling
@@ -143,23 +183,57 @@ async fn handle_root(
     }
 }
 
-/// Handle WebSocket connections from browser (using Rapace AxumTransport)
-async fn handle_websocket(
-    socket: axum::extract::ws::WebSocket,
+/// Handle raw binary Rapace TCP connection (no HTTP)
+async fn handle_rapace_tcp(
+    tcp_stream: tokio::net::TcpStream,
     service: Arc<HindsightServiceImpl>,
 ) {
-    tracing::info!("New WebSocket Rapace connection from browser");
+    tracing::info!("Handling raw Rapace binary connection");
 
-    // Use Rapace's AxumTransport - now supports axum WebSocket directly!
-    let transport = Arc::new(rapace_transport_websocket::AxumTransport::new(socket));
-    let server = HindsightServiceServer::new(service.as_ref().clone());
+    let transport = Arc::new(rapace::transport::StreamTransport::new(tcp_stream));
+    let session = Arc::new(RpcSession::new(transport));
 
-    // Serve using Rapace's built-in serve method
-    if let Err(e) = server.serve(transport).await {
-        tracing::error!("WebSocket Rapace session error: {:?}", e);
+    session.set_dispatcher(move |_channel_id, method_id, payload| {
+        let service_impl = service.as_ref().clone();
+        Box::pin(async move {
+            let server = HindsightServiceServer::new(service_impl);
+            server.dispatch(method_id, &payload).await
+        })
+    });
+
+    if let Err(e) = session.run().await {
+        tracing::error!("Raw Rapace session error: {}", e);
     }
 
-    tracing::info!("WebSocket Rapace connection closed");
+    tracing::info!("Raw Rapace connection closed");
+}
+
+/// Handle WebSocket at TCP level using tokio-tungstenite
+async fn handle_websocket_tcp(
+    tcp_stream: tokio::net::TcpStream,
+    service: Arc<HindsightServiceImpl>,
+) {
+    tracing::info!("Accepting WebSocket connection with tokio-tungstenite");
+
+    // Let tokio-tungstenite handle the entire WebSocket handshake (including HTTP headers)
+    match tokio_tungstenite::accept_async(tcp_stream).await {
+        Ok(ws_stream) => {
+            tracing::info!("WebSocket handshake complete, starting Rapace session");
+
+            // Use Rapace's TungsteniteTransport (TcpStream IS Sync!)
+            let transport = Arc::new(rapace_transport_websocket::TungsteniteTransport::new(ws_stream));
+            let server = HindsightServiceServer::new(service.as_ref().clone());
+
+            if let Err(e) = server.serve(transport).await {
+                tracing::error!("WebSocket Rapace session error: {:?}", e);
+            }
+
+            tracing::info!("WebSocket Rapace connection closed");
+        }
+        Err(e) => {
+            tracing::error!("WebSocket handshake failed: {:?}", e);
+        }
+    }
 }
 
 /// Handle Rapace HTTP upgrade (for native clients)
