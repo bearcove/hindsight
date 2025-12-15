@@ -27,6 +27,10 @@ enum Commands {
         /// TTL for traces in seconds
         #[arg(long, default_value = "3600")]
         ttl: u64,
+
+        /// Load seed data on startup for UI development
+        #[arg(long)]
+        seed: bool,
     },
 }
 
@@ -37,8 +41,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { http_port, tcp_port, host, ttl } => {
-            hindsight_server::run_server(host, http_port, tcp_port, ttl).await
+        Commands::Serve { http_port, tcp_port, host, ttl, seed } => {
+            hindsight_server::run_server(host, http_port, tcp_port, ttl, seed).await
         }
     }
 }

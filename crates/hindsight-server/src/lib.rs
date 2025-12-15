@@ -1,5 +1,6 @@
 mod storage;
 mod service_impl;
+mod seed_data;
 
 use axum::{
     extract::Request,
@@ -19,11 +20,19 @@ use tower::Service;
 use crate::service_impl::HindsightServiceImpl;
 use crate::storage::TraceStore;
 
-pub async fn run_server(host: impl Into<String>, http_port: u16, tcp_port: u16, ttl_secs: u64) -> anyhow::Result<()> {
+pub async fn run_server(host: impl Into<String>, http_port: u16, tcp_port: u16, ttl_secs: u64, seed: bool) -> anyhow::Result<()> {
     let host = host.into();
     tracing::info!("🔍 Hindsight server starting");
 
     let store = TraceStore::new(Duration::from_secs(ttl_secs));
+
+    // Load seed data if requested
+    if seed {
+        tracing::info!("Loading seed data for UI development...");
+        seed_data::load_seed_data(&store);
+        tracing::info!("Seed data loaded successfully");
+    }
+
     let service = Arc::new(HindsightServiceImpl::new(store));
 
     // Spawn raw TCP server on port 1991 (for clients that want to skip HTTP handshake)
