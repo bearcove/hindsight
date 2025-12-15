@@ -29,9 +29,6 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 futures = "0.3"
 
-# Serialization (for REST API)
-serde_json.workspace = true
-
 # CLI
 clap.workspace = true
 

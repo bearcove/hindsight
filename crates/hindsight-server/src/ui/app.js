@@ -5,13 +5,35 @@ class HindsightApp {
         this.traces = [];
         this.filteredTraces = [];
         this.selectedTrace = null;
+        this.rapaceClient = null;
+        this.hindsightService = null;
         this.init();
     }
 
-    init() {
+    async init() {
+        await this.connectRapace();
         this.setupEventListeners();
         this.loadTraces();
         this.startAutoRefresh();
+    }
+
+    async connectRapace() {
+        try {
+            // Connect to WebSocket with Rapace protocol
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/`;
+
+            this.rapaceClient = new RapaceClient(wsUrl);
+            await this.rapaceClient.connect();
+
+            this.hindsightService = new HindsightServiceClient(this.rapaceClient);
+
+            console.log('✅ Connected to Hindsight via Rapace over WebSocket!');
+            this.updateConnectionStatus(true);
+        } catch (error) {
+            console.error('❌ Failed to connect to Hindsight:', error);
+            this.updateConnectionStatus(false);
+        }
     }
 
     setupEventListeners() {
@@ -28,22 +50,30 @@ class HindsightApp {
     }
 
     async loadTraces() {
+        if (!this.hindsightService) {
+            console.warn('Rapace client not connected yet');
+            return;
+        }
+
         try {
-            const response = await fetch('/api/traces');
-            const data = await response.json();
+            // Call Hindsight service via Rapace RPC!
+            const filter = {
+                service: null,
+                min_duration_nanos: null,
+                max_duration_nanos: null,
+                has_errors: null,
+                limit: 100,
+            };
 
-            if (data.error) {
-                console.error('Error loading traces:', data.error);
-                this.updateConnectionStatus(false);
-                return;
-            }
+            const summaries = await this.hindsightService.listTraces(filter);
+            console.log(`📊 Received ${summaries.length} traces via Rapace`);
 
-            this.traces = data.traces || [];
+            this.traces = summaries;
             this.applyFilters();
             this.updateConnectionStatus(true);
             this.updateStats();
         } catch (error) {
-            console.error('Failed to load traces:', error);
+            console.error('Failed to load traces via Rapace:', error);
             this.updateConnectionStatus(false);
         }
     }
@@ -130,17 +160,18 @@ class HindsightApp {
 
     async showTraceDetail(traceSummary) {
         try {
-            const response = await fetch(`/api/traces/${traceSummary.trace_id}`);
-            const data = await response.json();
+            // Call Hindsight service via Rapace RPC!
+            const trace = await this.hindsightService.getTrace(traceSummary.trace_id);
 
-            if (data.error) {
-                console.error('Error loading trace detail:', data.error);
+            if (!trace) {
+                console.error('Trace not found');
                 return;
             }
 
-            this.renderTraceDetail(data.trace, traceSummary);
+            console.log(`📖 Received trace details via Rapace: ${trace.spans.length} spans`);
+            this.renderTraceDetail(trace, traceSummary);
         } catch (error) {
-            console.error('Failed to load trace detail:', error);
+            console.error('Failed to load trace detail via Rapace:', error);
         }
     }
 

@@ -2,10 +2,10 @@ mod storage;
 mod service_impl;
 
 use axum::{
-    extract::{Path, Request, State, WebSocketUpgrade},
+    extract::{Request, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response, Json},
-    routing::{get, post},
+    response::{Html, IntoResponse, Response},
+    routing::get,
     Router,
 };
 use hindsight_protocol::*;
@@ -93,8 +93,7 @@ async fn serve_http_unified(
                 handle_root(headers, ws, req, service.clone())
             }
         }))
-        .route("/api/traces", get(list_traces_handler))
-        .route("/api/traces/:trace_id", get(get_trace_handler))
+        .route("/rapace.js", get(serve_rapace_js))
         .route("/app.js", get(serve_js))
         .with_state(service);
 
@@ -145,17 +144,78 @@ async fn handle_root(
     }
 }
 
-/// Handle WebSocket upgrade (for WASM clients)
+/// Handle WebSocket upgrade (for browser clients speaking Rapace!)
 async fn handle_websocket(
-    _socket: axum::extract::ws::WebSocket,
-    _service: Arc<HindsightServiceImpl>,
+    mut socket: axum::extract::ws::WebSocket,
+    service: Arc<HindsightServiceImpl>,
 ) {
-    tracing::info!("New WebSocket connection");
+    use axum::extract::ws::Message;
 
-    // TODO: Actually create the Rapace WebSocket transport here
-    // For now, this is a placeholder - we'll need to properly bridge
-    // the Axum WebSocket to rapace-transport-websocket
-    tracing::warn!("WebSocket Rapace transport not yet implemented in unified server");
+    tracing::info!("New WebSocket Rapace connection from browser");
+
+    while let Some(msg) = socket.recv().await {
+        match msg {
+            Ok(Message::Binary(data)) => {
+                // Got a Rapace RPC frame!
+                // Format: [descriptor (8 bytes)][payload]
+                if data.len() < 8 {
+                    tracing::warn!("Invalid Rapace frame: too short");
+                    continue;
+                }
+
+                // Parse descriptor
+                let desc_bytes: [u8; 8] = data[0..8].try_into().unwrap();
+                let descriptor = u64::from_le_bytes(desc_bytes);
+
+                let channel_id = (descriptor & 0xFFFFFFFF) as u32;
+                let method_id = ((descriptor >> 32) & 0xFFFFFFFF) as u32;
+
+                let payload = &data[8..];
+
+                tracing::debug!("Received Rapace RPC: channel={}, method={}, payload_len={}",
+                    channel_id, method_id, payload.len());
+
+                // Dispatch to HindsightService
+                let server = HindsightServiceServer::new(service.as_ref().clone());
+                match server.dispatch(method_id, payload).await {
+                    Ok(response) => {
+                        // Send response back as Rapace frame
+                        let response_payload = response.payload();
+                        let mut frame = Vec::with_capacity(8 + response_payload.len());
+                        frame.extend_from_slice(&descriptor.to_le_bytes());
+                        frame.extend_from_slice(response_payload);
+
+                        if let Err(e) = socket.send(Message::Binary(frame)).await {
+                            tracing::error!("Failed to send WebSocket response: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("RPC dispatch error: {:?}", e);
+                        // Send error response
+                        let error_payload = format!("Error: {:?}", e).into_bytes();
+                        let mut frame = Vec::with_capacity(8 + error_payload.len());
+                        frame.extend_from_slice(&descriptor.to_le_bytes());
+                        frame.extend_from_slice(&error_payload);
+                        let _ = socket.send(Message::Binary(frame)).await;
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => {
+                tracing::info!("WebSocket closed by client");
+                break;
+            }
+            Ok(_) => {
+                // Ignore non-binary messages
+            }
+            Err(e) => {
+                tracing::error!("WebSocket error: {}", e);
+                break;
+            }
+        }
+    }
+
+    tracing::info!("WebSocket Rapace connection closed");
 }
 
 /// Handle Rapace HTTP upgrade (for native clients)
@@ -225,103 +285,16 @@ async fn handle_rapace_connection(upgraded: Upgraded, service: Arc<HindsightServ
     }
 }
 
-/// REST API handler: List traces
-async fn list_traces_handler(
-    State(service): State<Arc<HindsightServiceImpl>>,
-) -> Json<serde_json::Value> {
-    let filter = TraceFilter {
-        service: None,
-        min_duration_nanos: None,
-        max_duration_nanos: None,
-        has_errors: None,
-        limit: Some(100),
-    };
-
-    let summaries = service.list_traces(filter).await;
-
-    // Convert to JSON
-    let traces: Vec<serde_json::Value> = summaries.iter().map(|s| {
-        serde_json::json!({
-            "trace_id": s.trace_id.to_hex(),
-            "root_span_name": s.root_span_name,
-            "service_name": s.service_name,
-            "start_time_nanos": s.start_time.0,
-            "duration_nanos": s.duration_nanos,
-            "span_count": s.span_count,
-            "error_count": if s.has_errors { 1 } else { 0 },
-            "trace_type": format!("{:?}", s.trace_type),
-        })
-    }).collect();
-
-    Json(serde_json::json!({
-        "traces": traces,
-        "total": summaries.len(),
-    }))
+/// Serve Rapace JavaScript client
+async fn serve_rapace_js() -> impl IntoResponse {
+    let js = include_str!("ui/rapace.js");
+    Response::builder()
+        .header("Content-Type", "application/javascript")
+        .body(js.to_string())
+        .unwrap()
 }
 
-/// REST API handler: Get trace by ID
-async fn get_trace_handler(
-    State(service): State<Arc<HindsightServiceImpl>>,
-    Path(trace_id): Path<String>,
-) -> Json<serde_json::Value> {
-    // Parse trace ID from hex string
-    let trace_id = match TraceId::from_hex(&trace_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return Json(serde_json::json!({
-                "error": "Invalid trace ID format",
-            }));
-        }
-    };
-
-    match service.get_trace(trace_id).await {
-        Some(trace) => {
-            // Convert trace to JSON
-            let spans: Vec<serde_json::Value> = trace.spans.iter().map(|s| {
-                let attributes: Vec<serde_json::Value> = s.attributes.iter().map(|(k, v)| {
-                    let value_json = match v {
-                        AttributeValue::String(s) => serde_json::Value::String(s.clone()),
-                        AttributeValue::Int(i) => serde_json::json!(i),
-                        AttributeValue::Float(f) => serde_json::json!(f),
-                        AttributeValue::Bool(b) => serde_json::Value::Bool(*b),
-                    };
-                    serde_json::json!({
-                        "key": k,
-                        "value": value_json,
-                    })
-                }).collect();
-
-                serde_json::json!({
-                    "trace_id": s.trace_id.to_hex(),
-                    "span_id": s.span_id.to_hex(),
-                    "parent_span_id": s.parent_span_id.map(|id| id.to_hex()),
-                    "name": s.name,
-                    "service_name": s.service_name,
-                    "start_time_nanos": s.start_time.0,
-                    "end_time_nanos": s.end_time.map(|t| t.0),
-                    "duration_nanos": s.duration_nanos(),
-                    "attributes": attributes,
-                })
-            }).collect();
-
-            Json(serde_json::json!({
-                "trace": {
-                    "trace_id": trace.trace_id.to_hex(),
-                    "root_span_id": trace.root_span_id.to_hex(),
-                    "trace_type": format!("{:?}", trace.classify_type()),
-                    "spans": spans,
-                }
-            }))
-        }
-        None => {
-            Json(serde_json::json!({
-                "error": "Trace not found",
-            }))
-        }
-    }
-}
-
-/// Serve JavaScript file
+/// Serve main app JavaScript
 async fn serve_js() -> impl IntoResponse {
     let js = include_str!("ui/app.js");
     Response::builder()
