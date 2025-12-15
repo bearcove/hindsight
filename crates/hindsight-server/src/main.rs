@@ -21,7 +21,7 @@ enum Commands {
         tcp_port: u16,
 
         /// Host to bind to
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = "0.0.0.0")]
         host: String,
 
         /// TTL for traces in seconds
