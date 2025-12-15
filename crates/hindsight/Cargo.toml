@@ -9,19 +9,10 @@ description = "Client library for sending spans to Hindsight tracing server"
 
 [dependencies]
 hindsight-protocol = { path = "../hindsight-protocol" }
+rapace.workspace = true
 
 tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
-anyhow.workspace = true
-
-# HTTP client
-reqwest = { version = "0.12", features = ["json"] }
-
-# Optional: WebSocket client
-tokio-tungstenite = { version = "0.21", optional = true }
 
 [features]
 default = []
-websocket = ["dep:tokio-tungstenite"]
