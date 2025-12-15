@@ -1,9 +1,8 @@
 use facet::Facet;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// 16-byte trace ID (128 bits)
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Facet)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Facet)]
 pub struct TraceId(pub [u8; 16]);
 
 impl TraceId {
@@ -42,7 +41,7 @@ impl fmt::Debug for TraceId {
 }
 
 /// 8-byte span ID (64 bits)
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Facet)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Facet)]
 pub struct SpanId(pub [u8; 8]);
 
 impl SpanId {

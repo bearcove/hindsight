@@ -1,124 +1,182 @@
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
-use web_sys::WebSocket;
+#![cfg(target_arch = "wasm32")]
 
-/// Initialize panic hook for better error messages in browser console
+//! Hindsight WASM frontend using Sycamore
+//!
+//! Pure Rust UI that connects to Hindsight server via Rapace over WebSocket.
+
+use std::sync::Arc;
+use sycamore::prelude::*;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::spawn_local;
+use rapace::{RpcSession, WebSocketTransport};
+use hindsight_protocol::*;
+
+mod components;
+
+use components::*;
+
+/// Main entry point - renders the Hindsight app
 #[wasm_bindgen(start)]
-pub fn init() {
-    #[cfg(feature = "console_error_panic_hook")]
+pub fn main() {
     console_error_panic_hook::set_once();
 
-    web_sys::console::log_1(&"🔍 Hindsight WASM client initialized".into());
+    web_sys::console::log_1(&"🔍 Hindsight WASM starting...".into());
+
+    sycamore::render(|cx| {
+        view! { cx,
+            App {}
+        }
+    });
 }
 
-/// Hindsight client that connects to the server via WebSocket
-#[wasm_bindgen]
-pub struct HindsightClient {
-    url: String,
-    ws: Option<WebSocket>,
+/// Root application component
+#[component]
+fn App<G: Html>(cx: Scope) -> View<G> {
+    // Connection state
+    let connected = create_signal(cx, false);
+    let connection_status = create_signal(cx, "Connecting...".to_string());
+
+    // Trace data
+    let traces = create_signal(cx, Vec::<TraceSummary>::new());
+    let filtered_traces = create_signal(cx, Vec::<TraceSummary>::new());
+    let selected_trace = create_signal(cx, Option::<Trace>::None);
+
+    // Filters
+    let service_filter = create_signal(cx, String::new());
+    let type_filter = create_signal(cx, String::new());
+    let min_duration = create_signal(cx, 0u64);
+    let search_query = create_signal(cx, String::new());
+
+    // Statistics
+    let total_traces = create_signal(cx, 0usize);
+    let shown_traces = create_signal(cx, 0usize);
+
+    // Initialize Rapace client
+    spawn_local(async move {
+        match init_client().await {
+            Ok(client) => {
+                web_sys::console::log_1(&"✅ Connected to Hindsight via Rapace!".into());
+                connected.set(true);
+                connection_status.set("Connected".to_string());
+
+                // Load initial traces
+                if let Ok(trace_list) = client.list_traces(TraceFilter::default()).await {
+                    traces.set(trace_list.clone());
+                    filtered_traces.set(trace_list.clone());
+                    total_traces.set(trace_list.len());
+                    shown_traces.set(trace_list.len());
+                }
+
+                // TODO: Store client for future use
+            }
+            Err(e) => {
+                web_sys::console::error_1(&format!("❌ Failed to connect: {:?}", e).into());
+                connection_status.set("Disconnected".to_string());
+            }
+        }
+    });
+
+    view! { cx,
+        div(class="app") {
+            // Header
+            header(class="header") {
+                h1 {
+                    span { "🔍" }
+                    " Hindsight"
+                }
+                div(class="status-badge") {
+                    div(class="status-dot") {}
+                    span { (connection_status.get()) }
+                }
+            }
+
+            // Main content
+            div(class="content") {
+                // Sidebar with filters
+                aside(class="sidebar") {
+                    div(class="sidebar-section") {
+                        h2 { "Filters" }
+                        // TODO: Filter components
+                    }
+
+                    div(class="sidebar-section") {
+                        h2 { "Statistics" }
+                        p { "Total Traces: " strong { (total_traces.get()) } }
+                        p { "Shown: " strong { (shown_traces.get()) } }
+                    }
+                }
+
+                // Main panel with trace list
+                main(class="main-panel") {
+                    div(class="panel-header") {
+                        h2 { "Traces" }
+                        button(class="btn") { "Refresh" }
+                    }
+
+                    div(class="trace-list") {
+                        (if filtered_traces.get().is_empty() {
+                            view! { cx,
+                                div(class="empty-state") {
+                                    div(class="empty-state-icon") { "📭" }
+                                    div(class="empty-state-title") { "No traces found" }
+                                    div(class="empty-state-text") {
+                                        "Send some traces from your application to see them here."
+                                    }
+                                }
+                            }
+                        } else {
+                            view! { cx,
+                                Indexed(
+                                    iterable=filtered_traces,
+                                    view=|cx, trace| view! { cx,
+                                        TraceCard(trace=trace)
+                                    }
+                                )
+                            }
+                        })
+                    }
+                }
+            }
+        }
+    }
 }
 
-#[wasm_bindgen]
-impl HindsightClient {
-    /// Create a new client (not yet connected)
-    #[wasm_bindgen(constructor)]
-    pub fn new(url: String) -> Self {
-        web_sys::console::log_1(&format!("Creating HindsightClient for {}", url).into());
+/// Initialize the Rapace client connection
+async fn init_client() -> Result<HindsightServiceClient<WebSocketTransport>, String> {
+    let protocol = if web_sys::window()
+        .and_then(|w| w.location().protocol().ok())
+        .map(|p| p == "https:")
+        .unwrap_or(false)
+    {
+        "wss:"
+    } else {
+        "ws:"
+    };
 
-        Self {
-            url,
-            ws: None,
+    let host = web_sys::window()
+        .and_then(|w| w.location().host().ok())
+        .unwrap_or_else(|| "localhost:1990".to_string());
+
+    let url = format!("{}//{}/", protocol, host);
+
+    web_sys::console::log_1(&format!("Connecting to {}", url).into());
+
+    let transport = WebSocketTransport::connect(&url)
+        .await
+        .map_err(|e| format!("Transport error: {:?}", e))?;
+
+    let transport = Arc::new(transport);
+    let session = Arc::new(RpcSession::with_channel_start(transport.clone(), 2));
+
+    // Keep session running
+    let session_clone = session.clone();
+    spawn_local(async move {
+        if let Err(e) = session_clone.run().await {
+            web_sys::console::error_1(&format!("Session error: {:?}", e).into());
         }
-    }
+    });
 
-    /// Connect to the Hindsight server
-    pub async fn connect(&mut self) -> Result<(), JsValue> {
-        web_sys::console::log_1(&format!("Connecting to {}...", self.url).into());
+    let client = HindsightServiceClient::new(session);
 
-        // For now, we'll use a simple WebSocket connection
-        // TODO: Integrate with Rapace WebSocket transport
-        let ws = WebSocket::new(&self.url)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create WebSocket: {:?}", e)))?;
-
-        ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
-
-        // Wait for connection to open
-        let ws_clone = ws.clone();
-        let promise = js_sys::Promise::new(&mut |resolve, reject| {
-            let onopen = Closure::wrap(Box::new(move |_| {
-                web_sys::console::log_1(&"WebSocket connected!".into());
-                resolve.call0(&JsValue::NULL).ok();
-            }) as Box<dyn FnMut(JsValue)>);
-
-            let onerror = Closure::wrap(Box::new(move |e: web_sys::ErrorEvent| {
-                web_sys::console::error_1(&format!("WebSocket error: {:?}", e).into());
-                reject.call1(&JsValue::NULL, &e.into()).ok();
-            }) as Box<dyn FnMut(web_sys::ErrorEvent)>);
-
-            ws_clone.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-            ws_clone.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-
-            onopen.forget();
-            onerror.forget();
-        });
-
-        JsFuture::from(promise).await?;
-
-        self.ws = Some(ws);
-
-        Ok(())
-    }
-
-    /// List recent traces
-    pub async fn list_traces(&self) -> Result<JsValue, JsValue> {
-        web_sys::console::log_1(&"Listing traces...".into());
-
-        // For now, return mock data
-        // TODO: Implement actual Rapace RPC call to list_traces()
-        let mock_traces = js_sys::Array::new();
-
-        for i in 0..5 {
-            let trace = js_sys::Object::new();
-            js_sys::Reflect::set(&trace, &"trace_id".into(), &format!("trace-{}", i).into())?;
-            js_sys::Reflect::set(&trace, &"name".into(), &format!("test_span_{}", i).into())?;
-            js_sys::Reflect::set(&trace, &"span_count".into(), &(i + 3).into())?;
-            js_sys::Reflect::set(&trace, &"duration_ms".into(), &(100 + i * 50).into())?;
-            mock_traces.push(&trace);
-        }
-
-        Ok(mock_traces.into())
-    }
-
-    /// Get a specific trace by ID
-    pub async fn get_trace(&self, trace_id: String) -> Result<JsValue, JsValue> {
-        web_sys::console::log_1(&format!("Getting trace {}...", trace_id).into());
-
-        // For now, return mock data
-        // TODO: Implement actual Rapace RPC call to get_trace()
-        let trace = js_sys::Object::new();
-        js_sys::Reflect::set(&trace, &"trace_id".into(), &trace_id.into())?;
-        js_sys::Reflect::set(&trace, &"root_span_name".into(), &"test_span".into())?;
-
-        let spans = js_sys::Array::new();
-        for i in 0..3 {
-            let span = js_sys::Object::new();
-            js_sys::Reflect::set(&span, &"span_id".into(), &format!("span-{}", i).into())?;
-            js_sys::Reflect::set(&span, &"name".into(), &format!("operation_{}", i).into())?;
-            js_sys::Reflect::set(&span, &"start_time".into(), &(i * 100).into())?;
-            js_sys::Reflect::set(&span, &"end_time".into(), &((i + 1) * 100).into())?;
-            spans.push(&span);
-        }
-        js_sys::Reflect::set(&trace, &"spans".into(), &spans)?;
-
-        Ok(trace.into())
-    }
-
-    /// Close the connection
-    pub fn close(&mut self) {
-        if let Some(ws) = &self.ws {
-            let _ = ws.close();
-            web_sys::console::log_1(&"WebSocket closed".into());
-        }
-        self.ws = None;
-    }
+    Ok(client)
 }

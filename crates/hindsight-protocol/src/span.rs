@@ -1,12 +1,11 @@
 use facet::Facet;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::trace_context::{TraceId, SpanId};
 
 /// Timestamp in nanoseconds since UNIX epoch
-#[derive(Clone, Copy, Debug, Facet, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Facet)]
 pub struct Timestamp(pub u64);
 
 impl Timestamp {
@@ -20,7 +19,7 @@ impl Timestamp {
 }
 
 /// Span represents a single operation in a trace
-#[derive(Clone, Debug, Facet, Serialize, Deserialize)]
+#[derive(Clone, Debug, Facet)]
 pub struct Span {
     pub trace_id: TraceId,
     pub span_id: SpanId,
@@ -42,7 +41,7 @@ impl Span {
 }
 
 /// Attribute value
-#[derive(Clone, Debug, Facet, Serialize, Deserialize)]
+#[derive(Clone, Debug, Facet)]
 #[repr(u8)]
 pub enum AttributeValue {
     String(String),
@@ -52,7 +51,7 @@ pub enum AttributeValue {
 }
 
 /// Event within a span
-#[derive(Clone, Debug, Facet, Serialize, Deserialize)]
+#[derive(Clone, Debug, Facet)]
 pub struct SpanEvent {
     pub name: String,
     pub timestamp: Timestamp,
@@ -60,7 +59,7 @@ pub struct SpanEvent {
 }
 
 /// Span completion status
-#[derive(Clone, Debug, Facet, Serialize, Deserialize)]
+#[derive(Clone, Debug, Facet)]
 #[repr(u8)]
 pub enum SpanStatus {
     Ok,
@@ -68,7 +67,7 @@ pub enum SpanStatus {
 }
 
 /// Complete trace (collection of spans)
-#[derive(Clone, Debug, Facet, Serialize, Deserialize)]
+#[derive(Clone, Debug, Facet)]
 pub struct Trace {
     pub trace_id: TraceId,
     pub spans: Vec<Span>,
@@ -163,7 +162,7 @@ impl Trace {
 }
 
 /// Type of trace based on framework detection
-#[derive(Clone, Debug, Facet, Serialize, Deserialize)]
+#[derive(Clone, Debug, Facet)]
 #[repr(u8)]
 pub enum TraceType {
     /// Generic trace with no special attributes
@@ -184,8 +183,20 @@ impl Default for TraceType {
     }
 }
 
+impl std::fmt::Display for TraceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TraceType::Generic => write!(f, "Generic"),
+            TraceType::Picante => write!(f, "Picante"),
+            TraceType::Rapace => write!(f, "Rapace"),
+            TraceType::Dodeca => write!(f, "Dodeca"),
+            TraceType::Mixed => write!(f, "Mixed"),
+        }
+    }
+}
+
 /// Summary of a trace (for listing)
-#[derive(Clone, Debug, Facet, Serialize, Deserialize)]
+#[derive(Clone, Debug, Facet)]
 pub struct TraceSummary {
     pub trace_id: TraceId,
     pub root_span_name: String,
@@ -198,7 +209,7 @@ pub struct TraceSummary {
 }
 
 /// Filter for querying traces
-#[derive(Clone, Debug, Default, Facet, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Facet)]
 pub struct TraceFilter {
     pub service: Option<String>,
     pub min_duration_nanos: Option<u64>,

@@ -11,29 +11,23 @@ description = "WASM client for Hindsight distributed tracing"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+hindsight-protocol = { path = "../hindsight-protocol", features = ["js"] }
+rapace = { path = "../../../rapace/crates/rapace", default-features = false, features = ["websocket"] }
+facet.workspace = true
+
+# Sycamore for reactive UI
+sycamore = { version = "0.9", features = ["web"] }
+
 # WASM bindings
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-console_error_panic_hook = { version = "0.1", optional = true }
+console_error_panic_hook = "0.1"
 
-# Web APIs
+# Web APIs (minimal - Sycamore handles most DOM stuff)
 web-sys = { version = "0.3", features = [
     "console",
-    "Window",
-    "Document",
-    "Element",
-    "HtmlElement",
-    "WebSocket",
-    "MessageEvent",
-    "CloseEvent",
-    "ErrorEvent",
-    "BinaryType",
 ] }
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde-wasm-bindgen = "0.6"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

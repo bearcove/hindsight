@@ -9,11 +9,14 @@ description = "Protocol definitions for Hindsight distributed tracing"
 
 [dependencies]
 facet.workspace = true
-rapace.workspace = true
+# Only need rapace for the service macro, not the runtime
+rapace = { path = "../../../rapace/crates/rapace", default-features = false }
 
-serde.workspace = true
-serde_json.workspace = true
 time.workspace = true
 thiserror.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+
+[features]
+# Enable js feature for WASM targets
+js = ["getrandom/js"]
