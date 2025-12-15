@@ -17,7 +17,7 @@ authors = ["Amos Wenger <amos@bearcove.net>"]
 [workspace.dependencies]
 # Bearcove ecosystem
 facet = "0.32"
-rapace = { path = "../rapace/crates/rapace" }
+rapace = { path = "../rapace/crates/rapace", features = ["stream", "websocket"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
