@@ -1,8 +1,10 @@
 # Hindsight + Picante Integration Plan
 ## Teaching Hindsight to Visualize Incremental Computation
 
+> Archived draft. Superseded by the unified plan at `PLAN.md`.
+
 **Date**: 2025-12-15
-**Depends On**: PLAN.md (Hindsight core implementation)
+**Depends On**: `docs/archive/PLAN_v1.md` (Hindsight core implementation, archived)
 **Purpose**: Extend Hindsight to understand Picante's incremental computation model
 
 ---

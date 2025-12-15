@@ -1,1832 +1,1308 @@
 # Hindsight Implementation Plan
-## Distributed Tracing Made Simple - Pure Rapace Edition
+## The Unified Observability Hub - Bidirectional RPC + Extensible Discovery
+
+**Date**: 2025-12-15
+**Unifies**:
+- `docs/archive/PLAN_v1.md` (original core plan)
+- `docs/archive/PLAN_v2_picante.md` (Picante integration plan)
+**Key Insight**: Hindsight discovers app capabilities at runtime and adapts its UI dynamically
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#architecture-overview)
-2. [Avoiding Infinite Loops](#avoiding-infinite-loops)
-3. [Phase 1: Protocol & Core Types](#phase-1-protocol--core-types)
-4. [Phase 2: Rapace Service Definition](#phase-2-rapace-service-definition)
-5. [Phase 3: Client Library](#phase-3-client-library)
-6. [Phase 4: Server Implementation](#phase-4-server-implementation)
-7. [Phase 5: Web UI (WASM + Rapace)](#phase-5-web-ui-wasm--rapace)
-8. [Phase 6: TUI (Native Rapace)](#phase-6-tui-native-rapace)
-9. [Phase 7: Integrations](#phase-7-integrations)
-10. [Testing Strategy](#testing-strategy)
-11. [Future Enhancements](#future-enhancements)
+1. [Vision](#vision)
+2. [Architecture](#architecture)
+3. [Service Discovery Protocol](#service-discovery-protocol)
+4. [Core Protocol](#core-protocol)
+5. [Standard Services](#standard-services)
+6. [App-Specific Services](#app-specific-services)
+7. [Implementation Phases](#implementation-phases)
+8. [UI Dynamic Adaptation](#ui-dynamic-adaptation)
+9. [Examples](#examples)
+10. [Notes from earlier drafts](#notes-from-earlier-drafts)
 
 ---
 
-## Architecture Overview
-
-### Pure Rapace Design
-
-**Key Decision:** Hindsight uses **only Rapace RPC** for all communication. No REST APIs, no custom protocols.
-
-```
-Applications                        Hindsight Server
-┌───────────────┐                  ┌──────────────────────────┐
-│  Your App     │                  │  HindsightService        │
-│  (rapace)     │──Rapace RPC─────▶│  (Rapace service)        │
-│               │  TCP/SHM/Unix    │  - ingest_spans()        │
-└───────────────┘                  │  - get_trace()           │
-                                   │  - list_traces()         │
-┌───────────────┐                  │  - stream_traces()       │
-│  Picante      │──Rapace RPC─────▶│                          │
-│  (rapace)     │  TCP/SHM/Unix    └───────────┬──────────────┘
-└───────────────┘                              │
-                                               │ Rapace RPC
-┌───────────────┐                              │ (different transports)
-│  Dodeca       │──Rapace RPC─────▶            │
-│  (rapace)     │  TCP/SHM/Unix    ┌───────────┴──────────────┐
-└───────────────┘                  │                          │
-                                   │                          │
-                    ┌──────────────┴─┐          ┌─────────────┴─────┐
-                    ▼                ▼          ▼                   ▼
-              ┌─────────┐      ┌─────────┐  ┌─────────┐      ┌──────────┐
-              │ Browser │      │   TUI   │  │ Rapace  │      │  Picante │
-              │ (WASM)  │      │ (Native)│  │  Cell   │      │  (opt-in)│
-              └─────────┘      └─────────┘  └─────────┘      └──────────┘
-                   │                │            │                  │
-                   │ rapace-        │ rapace-    │ rapace-         │ rapace-
-                   │ transport-     │ transport- │ transport-      │ transport-
-                   │ websocket      │ tcp        │ tcp             │ shm
-                   │                │            │                  │
-                   └────────────────┴────────────┴──────────────────┘
-                          ALL USING RAPACE RPC!
-```
-
-### Why Pure Rapace?
-
-1. **Dogfooding** - We use our own technology
-2. **Efficient** - Binary protocol, multiplexed channels
-3. **Type-safe** - Generated clients, no manual JSON parsing
-4. **Consistent** - Same protocol everywhere (native, browser, embedded)
-5. **Streaming** - Native Rapace streaming, not WebSocket hacks
-6. **Transport-agnostic** - TCP, WebSocket, SHM, Unix sockets
-
-### The Only HTTP
-
-**One tiny route** to serve the static HTML page that loads the WASM client:
-
-```rust
-// Minimal axum server ONLY for serving the WASM client
-Router::new()
-    .route("/", get(|| async {
-        Html(include_str!("ui/index.html"))
-    }))
-```
-
-Everything else? **Pure Rapace!**
-
----
-
-## Avoiding Infinite Loops
+## Vision
 
 ### The Problem
 
-If Hindsight traces itself, we get infinite recursion:
+Every bearcove tool needs observability:
+- **Rapace** - Cell topology, RPC metrics, transport stats
+- **Picante** - Query graphs, cache behavior, dependency tracking
+- **Dodeca** - Build info, page generation, template rendering
+
+**Bad approach**: Build separate debug UIs for each tool (3 WebUIs, 3 TUIs, maintenance nightmare)
+
+**Good approach**: **One unified hub that discovers app capabilities and adapts**
+
+### Hindsight is THE Hub
 
 ```
-1. App sends span to Hindsight via Rapace
-2. Hindsight's Rapace session is traced
-3. Rapace sends span to Hindsight
-4. Hindsight's Rapace session is traced...
-∞. Stack overflow! 💥
+                    ┌────────────────────────────────┐
+                    │   Hindsight (The Hub)          │
+                    │                                │
+                    │  • Receives traces             │
+                    │  • Discovers app capabilities  │
+                    │  • Adapts UI dynamically       │
+                    │  • Pure Rapace RPC             │
+                    └────────────┬───────────────────┘
+                                 │
+                    Bidirectional Rapace RPC
+                    (Apps → Hindsight: push traces)
+                    (Hindsight → Apps: pull app data)
+                                 │
+        ┌────────────────────────┼────────────────────────┐
+        ↓                        ↓                        ↓
+   ┌─────────┐            ┌──────────┐            ┌──────────┐
+   │ Rapace  │            │ Picante  │            │  Dodeca  │
+   │   App   │            │   App    │            │   App    │
+   └─────────┘            └──────────┘            └──────────┘
+        │                       │                       │
+    Exposes:              Exposes:                Exposes:
+    • TracingExporter     • TracingExporter       • TracingExporter
+    • ServiceIntrospect.  • ServiceIntrospect.    • ServiceIntrospect.
+    • RapaceIntrospect.   • PicanteIntrospect.    • DodecaIntrospect.
+      (cell topology)       (query graphs)          (build info)
 ```
 
-### Solution 1: Untraced Sessions
+**Key Innovation**: Apps expose introspection services. Hindsight calls `ServiceIntrospection.list_services()` on connect to discover what the app supports, then adapts its UI!
 
-**Mark Hindsight's internal sessions as untraced:**
+---
+
+## Architecture
+
+### Bidirectional RPC
+
+Unlike the original push-only draft, this plan uses **bidirectional Rapace**:
+
+**Direction 1: Apps → Hindsight** (Push)
+- Apps call `HindsightService.ingest_spans()` to send traces
+- Standard span data with W3C trace context
+- Includes method names directly (no separate lookup needed)
+
+**Direction 2: Hindsight → Apps** (Pull)
+- Hindsight calls `ServiceIntrospection.list_services()` to discover capabilities
+- Hindsight calls app-specific services (e.g., `PicanteIntrospection.get_query_graph()`)
+- Real-time data, not just historical traces
+
+### Connection Flow
+
+```
+1. App connects to Hindsight via Rapace
+   └─ TCP transport: HindsightClient::connect("localhost:1991")
+   └─ Or HTTP Upgrade: connect to localhost:1990 and upgrade to Rapace
+
+2. Hindsight accepts bidirectional session
+   └─ Session has TWO roles simultaneously:
+      • HindsightService (Hindsight side) - receives ingest_spans()
+      • AppIntrospection (App side) - Hindsight can call app methods
+
+3. Hindsight discovers app capabilities
+   └─ Calls app.list_services()
+   └─ Finds: ["ServiceIntrospection", "PicanteIntrospection", ...]
+
+4. Hindsight UI adapts
+   └─ Shows generic "Traces" tab (always)
+   └─ Shows "Picante Query Graph" tab (if PicanteIntrospection found)
+   └─ Shows "Rapace Topology" tab (if RapaceIntrospection found)
+
+5. App sends traces
+   └─ Calls hindsight.ingest_spans([...spans with method_name included])
+
+6. User views trace
+   └─ Hindsight calls app.get_picante_graph(trace_id) for details
+   └─ Renders specialized view
+```
+
+### Transport Matrix
+
+**Single Port Architecture**: Port **1990** handles everything via HTTP Upgrade!
+
+| Client          | Connection Method           | Protocol After Upgrade |
+|-----------------|-----------------------------|------------------------|
+| Native apps     | HTTP Upgrade: rapace        | Raw Rapace TCP         |
+| Browser (WASM)  | HTTP Upgrade: websocket     | WebSocket → Rapace RPC |
+| Web UI          | HTTP GET /                  | HTML (no upgrade)      |
+| Cells (plugins) | SHM (direct)                | Rapace (no HTTP)       |
+
+**Port 1991** (optional): Raw TCP Rapace for clients that want to skip HTTP handshake
+
+**The Upgrade Handshake** (native clients):
+```
+Client → Server:
+  GET / HTTP/1.1
+  Host: localhost:1990
+  Upgrade: rapace
+  Connection: Upgrade
+
+Server → Client:
+  HTTP/1.1 101 Switching Protocols
+  Upgrade: rapace
+  Connection: Upgrade
+
+[Both sides switch to raw Rapace binary protocol]
+```
+
+**Client Implementation**: Just 30 lines - write text, read until `\r\n\r\n`, check for `101`, done!
+
+**Why this works**:
+- ✅ Single port for all HTTP-based connections
+- ✅ Works through HTTP proxies
+- ✅ WebSocket is already HTTP Upgrade
+- ✅ Minimal overhead (one roundtrip)
+- ✅ No heavy HTTP client dependency needed
+
+---
+
+## Service Discovery Protocol
+
+### The Foundation (Built Today!)
+
+We just implemented complete service discovery in rapace:
+
+1. **Global Registry** - `ServiceRegistry::with_global()`
+2. **Auto-Registration** - Services register on creation via `#[rapace::service]` macro
+3. **ServiceIntrospection** RPC trait:
+   ```rust
+   #[rapace::service]
+   trait ServiceIntrospection {
+       async fn list_services(&self) -> Vec<ServiceInfo>;
+       async fn describe_service(&self, name: String) -> Option<ServiceInfo>;
+       async fn has_method(&self, method_id: u32) -> bool;
+   }
+   ```
+
+### Types (Already Implemented)
 
 ```rust
-// In hindsight-server: create RPC session WITHOUT tracer
-let session = RpcSession::new(transport);
-// NO .with_tracer() call!
+// In rapace-registry/src/introspection.rs
 
-// This session receives spans but doesn't emit them
-let service = HindsightServiceImpl::new(store);
-session.set_dispatcher(HindsightServiceServer::new(service));
-```
+#[derive(Facet)]
+pub struct ServiceInfo {
+    pub name: String,
+    pub doc: String,
+    pub methods: Vec<MethodInfo>,
+}
 
-**Key rule:** Hindsight's own RPC sessions **never** have a tracer attached.
+#[derive(Facet)]
+pub struct MethodInfo {
+    pub id: u32,
+    pub name: String,
+    pub full_name: String,  // "Calculator.add"
+    pub doc: String,
+    pub args: Vec<ArgInfo>,
+    pub is_streaming: bool,
+}
 
-### Solution 2: Service-Level Filtering
-
-Applications can configure which services to trace:
-
-```rust
-// In your application
-let tracer = Tracer::connect("tcp://localhost:9090").await?
-    .with_service_filter(|service_name| {
-        // Don't trace calls TO Hindsight
-        service_name != "HindsightService"
-    });
-
-let session = RpcSession::new(transport)
-    .with_tracer(tracer);
-```
-
-### Solution 3: Opt-In Tracing
-
-**Default:** Rapace sessions are **not traced** unless explicitly opted in.
-
-```rust
-// Rapace without tracing (default)
-let session = RpcSession::new(transport);
-
-// Rapace WITH tracing (explicit opt-in)
-let session = RpcSession::new(transport)
-    .with_tracer(tracer); // <-- Only if you want tracing
-```
-
-This means:
-- Hindsight's own sessions: **no tracer** ✅
-- Your app's sessions: **optionally traced** ✅
-- Picante's internal RPC: **optionally traced** ✅
-
-### Solution 4: Trace ID Propagation
-
-Hindsight can detect cycles by checking trace IDs:
-
-```rust
-impl HindsightServiceImpl {
-    async fn ingest_spans(&self, spans: Vec<Span>) {
-        // Filter out spans that are FROM Hindsight itself
-        let spans: Vec<_> = spans.into_iter()
-            .filter(|span| span.service_name != "hindsight-server")
-            .collect();
-
-        self.store.ingest(spans);
-    }
+#[derive(Facet)]
+pub struct ArgInfo {
+    pub name: String,
+    pub type_name: String,
 }
 ```
 
-### Documentation
+### Discovery Flow
 
-Clear docs in README.md:
-
-```markdown
-## Avoiding Self-Tracing
-
-⚠️ **Important:** Do NOT attach a tracer to Hindsight's RPC sessions!
-
-**Correct:**
 ```rust
-// Hindsight server creates session WITHOUT tracer
-let session = RpcSession::new(transport);
-session.set_dispatcher(HindsightServiceServer::new(service));
-```
+// Hindsight discovers app capabilities on connect:
 
-**Incorrect (causes infinite loop):**
-```rust
-// ❌ DON'T DO THIS!
-let session = RpcSession::new(transport)
-    .with_tracer(tracer); // <-- NO! Infinite loop!
-```
+let services = app_session.call_service_introspection_list_services().await?;
+
+for service in services {
+    match service.name.as_str() {
+        "PicanteIntrospection" => {
+            println!("📊 Picante app detected! Enabling query graph view");
+            ui_state.enable_picante_view();
+        }
+        "RapaceIntrospection" => {
+            println!("🔌 Rapace cell detected! Enabling topology view");
+            ui_state.enable_rapace_view();
+        }
+        "DodecaIntrospection" => {
+            println!("📄 Dodeca app detected! Enabling build info view");
+            ui_state.enable_dodeca_view();
+        }
+        _ => {
+            // Generic service, no special handling
+        }
+    }
+}
 ```
 
 ---
 
-## Phase 1: Protocol & Core Types
+## Core Protocol
 
-**Goal:** Define W3C Trace Context and span data model using Facet for serialization.
-
-**Crate:** `hindsight-protocol`
-
-### 1.1 Dependencies
-
-```toml
-[dependencies]
-facet = { path = "../../../facet" }
-serde = { version = "1", features = ["derive"] }
-time = { version = "0.3", features = ["serde"] }
-thiserror = "1"
-getrandom = "0.2"
-hex = "0.4"
-```
-
-### 1.2 W3C Trace Context (`src/trace_context.rs`)
+### Span Schema (Enhanced from PLAN.md)
 
 ```rust
-use facet::Facet;
-use serde::{Deserialize, Serialize};
-use std::fmt;
+// In hindsight-protocol/src/span.rs
 
-/// 16-byte trace ID (128 bits)
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Facet)]
-pub struct TraceId(pub [u8; 16]);
-
-impl TraceId {
-    /// Generate a new random trace ID
-    pub fn new() -> Self {
-        let mut bytes = [0u8; 16];
-        getrandom::getrandom(&mut bytes).expect("failed to generate random trace ID");
-        Self(bytes)
-    }
-
-    /// Parse from hex string (W3C format: 32 hex chars)
-    pub fn from_hex(s: &str) -> Result<Self, TraceContextError> {
-        if s.len() != 32 {
-            return Err(TraceContextError::InvalidLength);
-        }
-        let bytes = hex::decode(s).map_err(|_| TraceContextError::InvalidHex)?;
-        Ok(Self(bytes.try_into().unwrap()))
-    }
-
-    /// Format as hex string
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-}
-
-impl fmt::Display for TraceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_hex())
-    }
-}
-
-/// 8-byte span ID (64 bits)
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Facet)]
-pub struct SpanId(pub [u8; 8]);
-
-impl SpanId {
-    /// Generate a new random span ID
-    pub fn new() -> Self {
-        let mut bytes = [0u8; 8];
-        getrandom::getrandom(&mut bytes).expect("failed to generate random span ID");
-        Self(bytes)
-    }
-
-    /// Parse from hex string (W3C format: 16 hex chars)
-    pub fn from_hex(s: &str) -> Result<Self, TraceContextError> {
-        if s.len() != 16 {
-            return Err(TraceContextError::InvalidLength);
-        }
-        let bytes = hex::decode(s).map_err(|_| TraceContextError::InvalidHex)?;
-        Ok(Self(bytes.try_into().unwrap()))
-    }
-
-    /// Format as hex string
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-}
-
-impl fmt::Display for SpanId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_hex())
-    }
-}
-
-/// W3C traceparent header: "00-{trace_id}-{span_id}-{flags}"
 #[derive(Clone, Debug, Facet)]
-pub struct TraceContext {
-    pub trace_id: TraceId,
-    pub span_id: SpanId,
-    pub parent_span_id: Option<SpanId>,
-    pub flags: u8,
-}
-
-impl TraceContext {
-    /// Create a new root trace context
-    pub fn new_root() -> Self {
-        Self {
-            trace_id: TraceId::new(),
-            span_id: SpanId::new(),
-            parent_span_id: None,
-            flags: 0x01, // Sampled
-        }
-    }
-
-    /// Create a child span in the same trace
-    pub fn child(&self) -> Self {
-        Self {
-            trace_id: self.trace_id,
-            span_id: SpanId::new(),
-            parent_span_id: Some(self.span_id),
-            flags: self.flags,
-        }
-    }
-
-    /// Parse from W3C traceparent header
-    pub fn from_traceparent(header: &str) -> Result<Self, TraceContextError> {
-        let parts: Vec<&str> = header.split('-').collect();
-        if parts.len() != 4 {
-            return Err(TraceContextError::InvalidFormat);
-        }
-
-        if parts[0] != "00" {
-            return Err(TraceContextError::UnsupportedVersion);
-        }
-
-        let trace_id = TraceId::from_hex(parts[1])?;
-        let span_id = SpanId::from_hex(parts[2])?;
-        let flags = u8::from_str_radix(parts[3], 16)
-            .map_err(|_| TraceContextError::InvalidHex)?;
-
-        Ok(Self {
-            trace_id,
-            span_id,
-            parent_span_id: None,
-            flags,
-        })
-    }
-
-    /// Format as W3C traceparent header
-    pub fn to_traceparent(&self) -> String {
-        format!(
-            "00-{}-{}-{:02x}",
-            self.trace_id.to_hex(),
-            self.span_id.to_hex(),
-            self.flags
-        )
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TraceContextError {
-    #[error("invalid traceparent format")]
-    InvalidFormat,
-    #[error("unsupported trace context version")]
-    UnsupportedVersion,
-    #[error("invalid hex encoding")]
-    InvalidHex,
-    #[error("invalid length")]
-    InvalidLength,
-}
-```
-
-### 1.3 Span Types (`src/span.rs`)
-
-```rust
-use facet::Facet;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::trace_context::{TraceId, SpanId};
-
-/// Timestamp in nanoseconds since UNIX epoch
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Facet)]
-pub struct Timestamp(pub u64);
-
-impl Timestamp {
-    pub fn now() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_nanos() as u64;
-        Self(nanos)
-    }
-}
-
-/// Span represents a single operation in a trace
-#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
 pub struct Span {
-    pub trace_id: TraceId,
-    pub span_id: SpanId,
+    pub trace_id: TraceId,           // W3C: 128-bit
+    pub span_id: SpanId,             // W3C: 64-bit
     pub parent_span_id: Option<SpanId>,
-    pub name: String,
-    pub start_time: Timestamp,
-    pub end_time: Option<Timestamp>,
+
+    // NEW: Include method name directly (don't require lookup)
+    pub name: String,                // "Query::parse_file" or "Calculator.add"
+    pub method_id: Option<u32>,      // Optional, for correlation
+    pub method_name: Option<String>, // Optional, "Calculator.add" (RECOMMENDED)
+
+    pub service_name: String,        // "my-app", "dodeca-server"
+    pub start_time_nanos: u64,
+    pub end_time_nanos: Option<u64>,
+
     pub attributes: HashMap<String, AttributeValue>,
     pub events: Vec<SpanEvent>,
-    pub status: SpanStatus,
-    pub service_name: String,
 }
 
-impl Span {
-    /// Calculate span duration in nanoseconds
-    pub fn duration_nanos(&self) -> Option<u64> {
-        self.end_time.map(|end| end.0 - self.start_time.0)
-    }
-}
-
-/// Attribute value
-#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
-#[serde(untagged)]
+#[derive(Clone, Debug, Facet)]
 pub enum AttributeValue {
     String(String),
     Int(i64),
     Float(f64),
     Bool(bool),
+    // Future: Bytes, Array
+}
+```
+
+**Key Decision**: Include `method_name` directly in span! No round-trip to app to resolve method_id → name.
+
+**Rationale**:
+- Works even if app disconnects after sending spans
+- Zero latency for historical traces
+- Standard pattern (OpenTelemetry does this with `rpc.method`)
+- ServiceIntrospection still useful for **live** debugging, just not historical trace viewing
+
+### HindsightService (Core)
+
+```rust
+// In hindsight-protocol/src/service.rs
+
+#[rapace::service]
+pub trait HindsightService {
+    /// Ingest spans from an application.
+    ///
+    /// Apps batch spans and send periodically (e.g., every 5 seconds or 100 spans).
+    async fn ingest_spans(&self, spans: Vec<Span>) -> IngestResult;
+
+    /// Get a complete trace by ID.
+    async fn get_trace(&self, trace_id: TraceId) -> Option<Trace>;
+
+    /// List recent traces with optional filtering.
+    async fn list_traces(&self, filter: TraceFilter) -> Vec<TraceSummary>;
+
+    /// Stream trace updates in real-time.
+    ///
+    /// Returns a stream of TraceEvent (new trace, trace updated, etc.).
+    async fn stream_traces(&self) -> Streaming<TraceEvent>;
+
+    /// Health check (useful for monitoring Hindsight itself).
+    async fn ping(&self) -> String;
 }
 
-/// Event within a span
-#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
-pub struct SpanEvent {
-    pub name: String,
-    pub timestamp: Timestamp,
-    pub attributes: HashMap<String, AttributeValue>,
+#[derive(Facet)]
+pub struct IngestResult {
+    pub accepted: u32,
+    pub rejected: u32,
+    pub errors: Vec<String>,
 }
 
-/// Span completion status
-#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
-#[serde(tag = "type")]
-pub enum SpanStatus {
-    Ok,
-    Error { message: String },
-}
-
-/// Complete trace (collection of spans)
-#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
-pub struct Trace {
-    pub trace_id: TraceId,
-    pub spans: Vec<Span>,
-    pub root_span_id: SpanId,
-    pub start_time: Timestamp,
-    pub end_time: Option<Timestamp>,
-}
-
-impl Trace {
-    /// Build a trace from a flat list of spans
-    pub fn from_spans(mut spans: Vec<Span>) -> Self {
-        spans.sort_by_key(|s| s.start_time.0);
-
-        let trace_id = spans[0].trace_id;
-        let root_span = spans.iter()
-            .find(|s| s.parent_span_id.is_none())
-            .expect("no root span found");
-        let root_span_id = root_span.span_id;
-        let start_time = root_span.start_time;
-
-        let end_time = spans.iter()
-            .filter_map(|s| s.end_time)
-            .max_by_key(|t| t.0);
-
-        Self {
-            trace_id,
-            spans,
-            root_span_id,
-            start_time,
-            end_time,
-        }
-    }
-
-    /// Get children of a given span
-    pub fn children(&self, span_id: SpanId) -> Vec<&Span> {
-        self.spans.iter()
-            .filter(|s| s.parent_span_id == Some(span_id))
-            .collect()
-    }
-}
-
-/// Summary of a trace (for listing)
-#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
+#[derive(Facet)]
 pub struct TraceSummary {
     pub trace_id: TraceId,
     pub root_span_name: String,
     pub service_name: String,
-    pub start_time: Timestamp,
-    pub duration_nanos: Option<u64>,
-    pub span_count: usize,
-    pub has_errors: bool,
+    pub start_time_nanos: u64,
+    pub duration_nanos: u64,
+    pub span_count: u32,
+    pub error_count: u32,
+
+    // NEW: Classification for UI rendering
+    pub trace_type: TraceType,
 }
 
-/// Filter for querying traces
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Facet)]
+#[derive(Facet)]
+pub enum TraceType {
+    Generic,
+    Picante,
+    Rapace,
+    Mixed,
+}
+
+#[derive(Facet)]
 pub struct TraceFilter {
-    pub service: Option<String>,
+    pub service_name: Option<String>,
     pub min_duration_nanos: Option<u64>,
-    pub max_duration_nanos: Option<u64>,
     pub has_errors: Option<bool>,
-    pub limit: Option<usize>,
+    pub limit: u32,
 }
-```
-
-### 1.4 Event Types (`src/events.rs`)
-
-```rust
-use facet::Facet;
-use serde::{Deserialize, Serialize};
-
-use crate::span::*;
-use crate::trace_context::*;
-
-/// Live event stream from Hindsight server
-#[derive(Clone, Debug, Serialize, Deserialize, Facet)]
-#[serde(tag = "type")]
-pub enum TraceEvent {
-    /// New trace started
-    TraceStarted {
-        trace_id: TraceId,
-        root_span_name: String,
-        service_name: String,
-    },
-
-    /// Trace completed
-    TraceCompleted {
-        trace_id: TraceId,
-        duration_nanos: u64,
-        span_count: usize,
-    },
-
-    /// New span added to a trace
-    SpanAdded {
-        trace_id: TraceId,
-        span: Span,
-    },
-}
-```
-
-**File Structure:**
-```
-crates/hindsight-protocol/src/
-├── lib.rs
-├── trace_context.rs
-├── span.rs
-└── events.rs
 ```
 
 ---
 
-## Phase 2: Rapace Service Definition
+## Standard Services
 
-**Goal:** Define the HindsightService using Rapace's service macro.
+Every app SHOULD expose these (provided by rapace-introspection):
 
-**Crate:** `hindsight-protocol`
-
-### 2.1 Service Definition (`src/service.rs`)
+### 1. ServiceIntrospection (Already Built!)
 
 ```rust
-use rapace::Streaming;
-use facet::Facet;
-
-use crate::span::*;
-use crate::trace_context::*;
-use crate::events::*;
-
-/// Hindsight tracing service (pure Rapace RPC)
 #[rapace::service]
-pub trait HindsightService {
-    /// Ingest a batch of spans
-    ///
-    /// Returns the number of spans accepted.
-    ///
-    /// Note: This is an untraced method to prevent infinite loops!
-    async fn ingest_spans(&self, spans: Vec<Span>) -> u32;
-
-    /// Get a specific trace by ID
-    ///
-    /// Returns None if the trace is not found or has expired.
-    async fn get_trace(&self, trace_id: TraceId) -> Option<Trace>;
-
-    /// List recent traces with optional filtering
-    async fn list_traces(&self, filter: TraceFilter) -> Vec<TraceSummary>;
-
-    /// Stream live trace events
-    ///
-    /// Emits events as traces are created, spans are added, and traces complete.
-    /// This is a long-lived stream that continues until the client disconnects.
-    async fn stream_traces(&self) -> Streaming<TraceEvent>;
-
-    /// Health check (useful for monitoring)
-    async fn ping(&self) -> String;
+pub trait ServiceIntrospection {
+    async fn list_services(&self) -> Vec<ServiceInfo>;
+    async fn describe_service(&self, name: String) -> Option<ServiceInfo>;
+    async fn has_method(&self, method_id: u32) -> bool;
 }
 ```
 
-### 2.2 Update lib.rs
+**Implementation**: `rapace-introspection::DefaultServiceIntrospection` (reads from global registry)
 
+**Usage in apps**:
 ```rust
-pub mod trace_context;
-pub mod span;
-pub mod events;
-pub mod service;
+use rapace_cell::run_multi;
 
-pub use trace_context::*;
-pub use span::*;
-pub use events::*;
-pub use service::*;
+run_multi(|builder| {
+    builder
+        .add_service(MyServiceServer::new(impl))
+        .with_introspection()  // ← One line!
+}).await?;
 ```
 
 ---
 
-## Phase 3: Client Library
+## App-Specific Services
 
-**Goal:** Provide a simple API for sending spans via Rapace.
-
-**Crate:** `hindsight`
-
-### 3.1 Dependencies
-
-```toml
-[dependencies]
-hindsight-protocol = { path = "../hindsight-protocol" }
-rapace = { path = "../../../rapace/crates/rapace" }
-
-tokio = { version = "1", features = ["full"] }
-facet = { path = "../../../facet" }
-
-[features]
-default = []
-```
-
-### 3.2 Tracer (`src/tracer.rs`)
+### 1. PicanteIntrospection (from the Picante integration draft)
 
 ```rust
-use hindsight_protocol::*;
-use rapace::{RpcSession, Transport};
-use std::sync::Arc;
-use tokio::sync::mpsc;
+// In picante/crates/picante-introspection/src/lib.rs
 
-/// Main entry point for sending spans
-pub struct Tracer {
-    inner: Arc<TracerInner>,
+#[rapace::service]
+pub trait PicanteIntrospection {
+    /// Get the dependency graph for a specific trace.
+    ///
+    /// Returns None if trace not found or not a Picante trace.
+    async fn get_query_graph(&self, trace_id: TraceId) -> Option<PicanteGraph>;
+
+    /// Get currently executing queries (live view).
+    async fn get_active_queries(&self) -> Vec<ActiveQuery>;
+
+    /// Get cache statistics.
+    async fn get_cache_stats(&self) -> CacheStats;
+
+    /// Stream query execution events in real-time.
+    async fn stream_query_events(&self) -> Streaming<QueryEvent>;
 }
 
-struct TracerInner {
-    service_name: String,
-    client: HindsightServiceClient,
-    span_tx: mpsc::UnboundedSender<Span>,
+#[derive(Facet)]
+pub struct PicanteGraph {
+    pub nodes: Vec<QueryNode>,
+    pub edges: Vec<QueryEdge>,
 }
 
-impl Tracer {
-    /// Connect to a Hindsight server via Rapace
-    ///
-    /// # Example
-    /// ```no_run
-    /// // TCP transport
-    /// let transport = rapace_transport_tcp::TcpTransport::connect("localhost:9090").await?;
-    /// let tracer = Tracer::new(transport).await?;
-    ///
-    /// // SHM transport (for same-machine communication)
-    /// let transport = rapace_transport_shm::ShmTransport::open("/tmp/hindsight.shm").await?;
-    /// let tracer = Tracer::new(transport).await?;
-    /// ```
-    pub async fn new<T: Transport + 'static>(transport: T) -> Result<Self, TracerError> {
-        // Detect service name (from env, or default)
-        let service_name = std::env::var("HINDSIGHT_SERVICE_NAME")
-            .unwrap_or_else(|_| "unknown".to_string());
+#[derive(Facet)]
+pub struct QueryNode {
+    pub span_id: SpanId,
+    pub query_kind: String,      // "parse_file", "file_text"
+    pub query_key: String,        // "src/main.rs"
+    pub cache_status: CacheStatus,  // Hit, Miss, Validated
+    pub duration_nanos: u64,
+    pub revision: Option<u64>,
+}
 
-        // Create Rapace session
-        // IMPORTANT: Do NOT attach a tracer to this session!
-        // (Prevents infinite loop)
-        let session = Arc::new(RpcSession::new(Arc::new(transport)));
+#[derive(Facet)]
+pub enum CacheStatus {
+    Hit,        // Retrieved from memo table (blue in UI)
+    Miss,       // Recomputed (yellow in UI)
+    Validated,  // Early cutoff verified unchanged (green in UI)
+}
 
-        // Create Rapace client
-        let client = HindsightServiceClient::new(session.clone());
+#[derive(Facet)]
+pub struct QueryEdge {
+    pub from: SpanId,  // dependency
+    pub to: SpanId,    // dependent
+}
 
-        // Channel for buffering spans before sending
-        let (span_tx, mut span_rx) = mpsc::unbounded_channel();
+#[derive(Facet)]
+pub struct ActiveQuery {
+    pub query_kind: String,
+    pub query_key: String,
+    pub started_nanos: u64,
+    pub state: QueryState,
+}
 
-        // Background task to batch and send spans
-        let client_clone = client.clone();
-        tokio::spawn(async move {
-            let mut batch = Vec::new();
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+#[derive(Facet)]
+pub enum QueryState {
+    CheckingCache,
+    Computing,
+    WaitingOnDependency(String),
+}
 
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        if !batch.is_empty() {
-                            let _ = client_clone.ingest_spans(batch.clone()).await;
-                            batch.clear();
-                        }
-                    }
-                    Some(span) = span_rx.recv() => {
-                        batch.push(span);
-                        if batch.len() >= 100 {
-                            let _ = client_clone.ingest_spans(batch.clone()).await;
-                            batch.clear();
-                        }
-                    }
+#[derive(Facet)]
+pub struct CacheStats {
+    pub total_queries: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_validations: u64,
+    pub cache_hit_rate: f64,
+    pub by_query_kind: HashMap<String, QueryKindStats>,
+}
+
+#[derive(Facet)]
+pub struct QueryKindStats {
+    pub query_kind: String,
+    pub total_executions: u64,
+    pub cache_hits: u64,
+    pub avg_duration_nanos: u64,
+    pub max_duration_nanos: u64,
+}
+```
+
+**Picante Span Attributes** (from the Picante integration draft):
+```rust
+// When emitting spans, Picante includes:
+attributes: {
+    "picante.query": true,
+    "picante.query_kind": "parse_file",
+    "picante.query_key": "src/main.rs",
+    "picante.cache_status": "hit" | "miss" | "validated",
+    "picante.revision": 42,
+    "picante.dependency_count": 3,
+}
+```
+
+### 2. RapaceIntrospection (from original debug UI plan)
+
+```rust
+// In rapace/crates/rapace-introspection-ext/src/lib.rs
+
+#[rapace::service]
+pub trait RapaceIntrospection {
+    /// Get cell topology (sessions, channels, peers).
+    async fn get_topology(&self) -> Topology;
+
+    /// Get transport metrics (frame counts, throughput, SHM stats).
+    async fn get_transport_metrics(&self) -> Vec<TransportMetrics>;
+
+    /// Get active RPC calls.
+    async fn get_active_rpcs(&self) -> Vec<ActiveRpc>;
+
+    /// Stream RPC events in real-time.
+    async fn stream_rpc_events(&self) -> Streaming<RpcEvent>;
+}
+
+#[derive(Facet)]
+pub struct Topology {
+    pub sessions: Vec<SessionInfo>,
+    pub connections: Vec<Connection>,
+}
+
+#[derive(Facet)]
+pub struct SessionInfo {
+    pub session_id: u64,
+    pub label: String,
+    pub session_type: SessionType,  // Host or Cell
+    pub transport_type: String,     // "SHM", "TCP", "WebSocket"
+    pub created_at: u64,
+}
+
+#[derive(Facet)]
+pub enum SessionType {
+    Host { channel_ids: String },  // "1, 3, 5, ..."
+    Cell { channel_ids: String },  // "2, 4, 6, ..."
+}
+
+#[derive(Facet)]
+pub struct Connection {
+    pub from_session_id: u64,
+    pub to_session_id: u64,
+    pub active_channels: u32,
+}
+
+#[derive(Facet)]
+pub struct TransportMetrics {
+    pub session_id: u64,
+    pub frames_sent: u64,
+    pub frames_received: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub inline_payload_count: u64,
+    pub external_payload_count: u64,
+    pub shm_metrics: Option<ShmMetrics>,
+}
+
+#[derive(Facet)]
+pub struct ShmMetrics {
+    pub zero_copy_count: u64,
+    pub slot_allocations: u64,
+    pub slot_usage_pct: f64,
+}
+
+#[derive(Facet)]
+pub struct ActiveRpc {
+    pub channel_id: u32,
+    pub method_name: String,
+    pub started_nanos: u64,
+    pub state: RpcState,
+}
+
+#[derive(Facet)]
+pub enum RpcState {
+    Pending,
+    Dispatched,
+    WaitingForResponse,
+}
+```
+
+### 3. DodecaIntrospection
+
+```rust
+// In dodeca/crates/dodeca-introspection/src/lib.rs
+
+#[rapace::service]
+pub trait DodecaIntrospection {
+    /// Get current build information.
+    async fn get_build_info(&self) -> BuildInfo;
+
+    /// List all pages in the site.
+    async fn list_pages(&self) -> Vec<PageInfo>;
+
+    /// Get template rendering stats.
+    async fn get_template_stats(&self) -> TemplateStats;
+
+    /// Stream build events (page compiled, asset generated, etc.).
+    async fn stream_build_events(&self) -> Streaming<BuildEvent>;
+}
+
+#[derive(Facet)]
+pub struct BuildInfo {
+    pub site_name: String,
+    pub output_dir: String,
+    pub page_count: u32,
+    pub asset_count: u32,
+    pub last_build_duration_nanos: u64,
+    pub build_state: BuildState,
+}
+
+#[derive(Facet)]
+pub enum BuildState {
+    Idle,
+    Building { progress_pct: f64 },
+    Error { message: String },
+}
+
+#[derive(Facet)]
+pub struct PageInfo {
+    pub path: String,
+    pub template: String,
+    pub last_rendered_nanos: u64,
+    pub render_duration_nanos: u64,
+}
+
+#[derive(Facet)]
+pub struct TemplateStats {
+    pub by_template: HashMap<String, TemplateKindStats>,
+}
+
+#[derive(Facet)]
+pub struct TemplateKindStats {
+    pub template_name: String,
+    pub render_count: u64,
+    pub avg_duration_nanos: u64,
+}
+```
+
+---
+
+## Implementation Phases
+
+### Phase 1: Core Hindsight ✅ **COMPLETE**
+
+**Goal**: Basic trace ingestion and viewing
+
+1.1. **Protocol & Types** (`hindsight-protocol`) ✅
+   - `Span`, `Trace`, `TraceId`, `SpanId` (W3C compliant)
+   - `HindsightService` trait
+   - Include `method_name` in Span
+   - `TraceType` enum (Generic, Picante, Rapace, Dodeca, Mixed)
+
+1.2. **Server** (`hindsight-server`) ✅
+   - HTTP server on port **1990** (serves HTML, handles WebSocket upgrade)
+   - TCP listener on port **1991** (raw Rapace, optional)
+   - In-memory storage (`DashMap<TraceId, Trace>`)
+   - TTL-based expiration (background cleanup every 60s)
+   - `HindsightServiceImpl` (untraced sessions!)
+   - Live event streaming via broadcast channel
+
+1.3. **Client Library** (`hindsight`) ✅
+   - `Tracer::new(transport)` → creates bidirectional session
+   - Batch spans (100 spans or 100ms intervals)
+   - Automatic W3C trace context propagation
+   - `SpanBuilder` fluent API with `.with_attribute()`, `.with_parent()`
+   - `ActiveSpan` for in-flight operations
+
+**What's Built**:
+- `examples/simple_client.rs` - Sends test spans
+- `examples/query_traces.rs` - Queries stored traces
+- `examples/test_classification.rs` - Tests all 5 trace types
+
+**Status**: End-to-end verified with 10 traces successfully ingested and queried!
+
+### Phase 2: Trace Classification ✅ **COMPLETE**
+
+**Goal**: Automatic trace type detection based on span attributes
+
+2.1. **TraceType Classification** (`hindsight-protocol/src/span.rs`) ✅
+   - `TraceType` enum: Generic, Picante, Rapace, Dodeca, Mixed
+   - `Trace::classify_type()` method that detects framework attributes:
+     - **Picante**: `picante.query` attribute
+     - **Rapace**: `rpc.system="rapace"` attribute
+     - **Dodeca**: `dodeca.build` attribute
+     - **Mixed**: Multiple framework types in one trace
+
+2.2. **Defensive Trace Building** ✅
+   - Changed `Trace::from_spans()` to return `Option<Trace>`
+   - Handles out-of-order span arrival (child before parent)
+   - Gracefully skips trace building when root span not yet received
+
+2.3. **Storage Integration** ✅
+   - `TraceSummary` includes `trace_type` field
+   - Automatic classification in `list_traces()`
+   - Storage handles Optional trace building
+
+**What's Built**:
+- `examples/test_classification.rs` - Sends all 5 trace types
+- Classification verified with mixed parent-child traces
+- Out-of-order span arrival handled correctly
+
+**Status**: All 5 trace types successfully classified and verified!
+
+**Note**: Full bidirectional service discovery (calling `ServiceIntrospection.list_services()` on app connect) is deferred to when we need dynamic UI adaptation in Phase 3+.
+
+### Phase 2.5: HTTP Upgrade for Rapace (Planned)
+
+**Goal**: Single-port architecture with HTTP Upgrade
+
+**Server** (`hindsight-server/src/main.rs`):
+- Port 1990 Axum server handles:
+  - `GET /` → serve HTML (web UI)
+  - `Upgrade: websocket` → WebSocket for WASM
+  - `Upgrade: rapace` → raw Rapace TCP for native clients
+- Port 1991 (optional): Direct TCP Rapace (skip HTTP handshake)
+
+**Client** (`hindsight/src/tracer.rs`):
+- Add `Tracer::connect_http(addr)` method
+- Writes HTTP upgrade request (~30 lines):
+  ```rust
+  stream.write_all(b"GET / HTTP/1.1\r\n").await?;
+  stream.write_all(b"Host: ...\r\n").await?;
+  stream.write_all(b"Upgrade: rapace\r\n").await?;
+  stream.write_all(b"Connection: Upgrade\r\n\r\n").await?;
+
+  // Read until \r\n\r\n, check for "101", done!
+  ```
+- No heavy HTTP client dependency needed!
+
+**Benefits**:
+- ✅ Single port for everything
+- ✅ Works through HTTP proxies
+- ✅ Minimal overhead (one roundtrip)
+- ✅ Client is trivial (no hyper dependency)
+
+**Status**: Architecture designed, implementation deferred
+
+### Phase 3: Generic Web UI
+
+**Goal**: View traces in browser
+
+3.1. **WASM Client** (`hindsight-wasm`)
+   - rapace-transport-websocket
+   - `HindsightServiceClient::new(ws_session)`
+   - Call `list_traces()`, `get_trace()`
+
+3.2. **UI Views**
+   - Trace list (table)
+   - Trace detail (waterfall/flamegraph)
+   - Filter by service, duration, errors
+
+**Test**: Open browser, see traces
+
+**Time Estimate**: 3-4 days
+
+### Phase 4: Picante Integration (from the Picante integration draft)
+
+**Goal**: Specialized Picante visualization
+
+4.1. **Picante emits spans** (in Picante repo)
+   - Instrument `Runtime` to emit spans
+   - Include picante.* attributes
+   - Send to Hindsight via `ingest_spans()`
+
+4.2. **Hindsight detects Picante** (`hindsight-protocol/picante.rs`)
+   - `PicanteGraph`, `PicanteNode`, `CacheStatus` types
+   - `build_picante_graph(trace)` function
+   - Detect picante.* attributes
+
+4.3. **Hindsight calls back to Picante**
+   - When viewing Picante trace, call `app.get_query_graph(trace_id)`
+   - Get live cache stats with `app.get_cache_stats()`
+
+4.4. **UI: Picante Trace View**
+   - D3.js dependency graph
+   - Color nodes by cache status (blue=hit, yellow=miss, green=validated)
+   - Show cache hit rate, query timeline
+
+4.5. **UI: Picante Stats Dashboard**
+   - Global cache hit rate
+   - Per-query-kind statistics table
+   - Trends over time
+
+**Test**: Run Picante app, see dependency graph with colored nodes
+
+**Time Estimate**: 4-5 days
+
+### Phase 5: Rapace Integration
+
+**Goal**: Cell topology and RPC metrics
+
+5.1. **Rapace exposes introspection** (in Rapace repo)
+   - Implement `RapaceIntrospection` service
+   - Collect topology, metrics, active RPCs
+   - Opt-in via feature flag
+
+5.2. **Hindsight detects Rapace**
+   - Call `app.get_topology()`, `app.get_transport_metrics()`
+   - Store in `RapaceState` per connection
+
+5.3. **UI: Rapace Topology View**
+   - Network graph (vis.js)
+   - Nodes = sessions, edges = connections
+   - Live RPC calls (flash animation)
+
+5.4. **UI: Rapace Metrics Dashboard**
+   - Transport stats (frames/sec, throughput)
+   - SHM metrics (zero-copy efficiency)
+   - Active RPC list
+
+**Test**: Run multi-cell app, see topology graph
+
+**Time Estimate**: 3-4 days
+
+### Phase 6: Dodeca Integration
+
+**Goal**: Build info and page stats
+
+6.1. **Dodeca exposes introspection** (in Dodeca repo)
+   - Implement `DodecaIntrospection` service
+   - Track build state, pages, templates
+
+6.2. **Hindsight detects Dodeca**
+   - Call `app.get_build_info()`, `app.list_pages()`
+
+6.3. **UI: Dodeca Build View**
+   - Build status, progress bar
+   - Page list with render times
+   - Template statistics
+
+**Test**: Run Dodeca build, watch progress in Hindsight
+
+**Time Estimate**: 2-3 days
+
+### Phase 7: TUI (from PLAN.md)
+
+**Goal**: Terminal UI with ratatui
+
+7.1. **TUI Client** (`hindsight-tui`)
+   - rapace-transport-tcp
+   - Views: trace list, trace detail, stats
+
+7.2. **TUI Dynamic Views**
+   - Show Picante/Rapace/Dodeca tabs based on discovery
+   - ASCII dependency graph for Picante
+   - Table views for stats
+
+**Test**: `hindsight-tui --connect localhost:9090`
+
+**Time Estimate**: 3-4 days
+
+### Phase 8: Streaming & Real-Time
+
+**Goal**: Live updates
+
+8.1. **Server streaming**
+   - `stream_traces()` → Streaming<TraceEvent>
+   - `stream_query_events()` (Picante)
+   - `stream_rpc_events()` (Rapace)
+   - `stream_build_events()` (Dodeca)
+
+8.2. **UI animations**
+   - Flash nodes as queries execute (Picante)
+   - Flash edges as RPCs sent (Rapace)
+   - Update build progress bar (Dodeca)
+
+**Test**: Watch live execution with animations
+
+**Time Estimate**: 2-3 days
+
+---
+
+## UI Dynamic Adaptation
+
+### How Hindsight UI Adapts
+
+```rust
+// Pseudo-code for UI adaptation logic
+
+struct HindsightUI {
+    tabs: Vec<Tab>,
+}
+
+impl HindsightUI {
+    async fn on_app_connected(&mut self, app: &AppSession) {
+        // Always show generic views
+        self.tabs.push(Tab::Traces);
+        self.tabs.push(Tab::Services);  // Show ServiceIntrospection results
+
+        // Discover app capabilities
+        let services = app.list_services().await?;
+
+        for service in services {
+            match service.name.as_str() {
+                "PicanteIntrospection" => {
+                    self.tabs.push(Tab::PicanteGraph);
+                    self.tabs.push(Tab::PicanteStats);
+                    self.enable_picante_rendering();
+                }
+                "RapaceIntrospection" => {
+                    self.tabs.push(Tab::RapaceTopology);
+                    self.tabs.push(Tab::RapaceMetrics);
+                    self.enable_rapace_rendering();
+                }
+                "DodecaIntrospection" => {
+                    self.tabs.push(Tab::DodecaBuild);
+                    self.tabs.push(Tab::DodecaPages);
+                    self.enable_dodeca_rendering();
+                }
+                _ => {
+                    // Unknown service, no special handling
                 }
             }
-        });
-
-        let inner = Arc::new(TracerInner {
-            service_name,
-            client,
-            span_tx,
-        });
-
-        Ok(Self { inner })
-    }
-
-    /// Start building a new span
-    pub fn span(&self, name: impl Into<String>) -> SpanBuilder {
-        SpanBuilder::new(
-            name.into(),
-            self.inner.service_name.clone(),
-            self.inner.span_tx.clone(),
-        )
-    }
-
-    /// Get the underlying Hindsight client (for advanced usage)
-    pub fn client(&self) -> &HindsightServiceClient {
-        &self.inner.client
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TracerError {
-    #[error("failed to connect to server")]
-    ConnectionFailed,
-}
-```
-
-### 3.3 Span Builder (`src/span_builder.rs`)
-
-```rust
-use hindsight_protocol::*;
-use std::collections::HashMap;
-use tokio::sync::mpsc;
-
-/// Builder for creating and starting spans
-pub struct SpanBuilder {
-    name: String,
-    service_name: String,
-    attributes: HashMap<String, AttributeValue>,
-    parent: Option<TraceContext>,
-    span_tx: mpsc::UnboundedSender<Span>,
-}
-
-impl SpanBuilder {
-    pub(crate) fn new(
-        name: String,
-        service_name: String,
-        span_tx: mpsc::UnboundedSender<Span>,
-    ) -> Self {
-        Self {
-            name,
-            service_name,
-            attributes: HashMap::new(),
-            parent: None,
-            span_tx,
         }
     }
 
-    /// Set the parent trace context (for propagation)
-    pub fn with_parent(mut self, parent: TraceContext) -> Self {
-        self.parent = Some(parent);
-        self
-    }
-
-    /// Add an attribute to the span
-    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<AttributeValue>) -> Self {
-        self.attributes.insert(key.into(), value.into());
-        self
-    }
-
-    /// Start the span
-    pub fn start(self) -> ActiveSpan {
-        let context = if let Some(parent) = self.parent {
-            parent.child()
-        } else {
-            TraceContext::new_root()
-        };
-
-        let span = Span {
-            trace_id: context.trace_id,
-            span_id: context.span_id,
-            parent_span_id: context.parent_span_id,
-            name: self.name,
-            start_time: Timestamp::now(),
-            end_time: None,
-            attributes: self.attributes,
-            events: Vec::new(),
-            status: SpanStatus::Ok,
-            service_name: self.service_name,
-        };
-
-        ActiveSpan {
-            span,
-            context,
-            span_tx: self.span_tx,
+    async fn render_trace(&self, trace: &Trace, app: &AppSession) {
+        match trace.trace_type {
+            TraceType::Generic => {
+                self.render_waterfall(trace);
+            }
+            TraceType::Picante => {
+                // Call back to app for detailed graph
+                let graph = app.get_picante_graph(trace.id).await?;
+                self.render_picante_graph(graph);
+            }
+            TraceType::Rapace => {
+                // Show RPC call chain with transport details
+                let rpcs = extract_rapace_spans(trace);
+                self.render_rpc_chain(rpcs);
+            }
+            TraceType::Mixed => {
+                // Show all views with tabs
+                self.render_multi_view(trace, app);
+            }
         }
-    }
-}
-
-/// Active span (not yet finished)
-pub struct ActiveSpan {
-    span: Span,
-    context: TraceContext,
-    span_tx: mpsc::UnboundedSender<Span>,
-}
-
-impl ActiveSpan {
-    /// Get the trace context (for propagation to downstream calls)
-    pub fn context(&self) -> &TraceContext {
-        &self.context
-    }
-
-    /// Add an event to the span
-    pub fn add_event(&mut self, name: impl Into<String>) {
-        self.span.events.push(SpanEvent {
-            name: name.into(),
-            timestamp: Timestamp::now(),
-            attributes: HashMap::new(),
-        });
-    }
-
-    /// Mark the span as errored
-    pub fn set_error(&mut self, message: impl Into<String>) {
-        self.span.status = SpanStatus::Error {
-            message: message.into(),
-        };
-    }
-
-    /// End the span and send it to the server
-    pub fn end(mut self) {
-        self.span.end_time = Some(Timestamp::now());
-        let _ = self.span_tx.send(self.span);
-    }
-}
-
-// Conversion helpers
-impl From<&str> for AttributeValue {
-    fn from(s: &str) -> Self {
-        AttributeValue::String(s.to_string())
-    }
-}
-
-impl From<String> for AttributeValue {
-    fn from(s: String) -> Self {
-        AttributeValue::String(s)
-    }
-}
-
-impl From<i64> for AttributeValue {
-    fn from(i: i64) -> Self {
-        AttributeValue::Int(i)
-    }
-}
-
-impl From<bool> for AttributeValue {
-    fn from(b: bool) -> Self {
-        AttributeValue::Bool(b)
     }
 }
 ```
 
-### 3.4 Example Usage
+### Example UI States
 
+**Scenario 1: Generic Rust App**
+```
+Connected to: my-rust-app
+Discovered services:
+  • ServiceIntrospection
+
+UI Tabs:
+  [Traces] [Services]
+```
+
+**Scenario 2: Picante App**
+```
+Connected to: picante-app
+Discovered services:
+  • ServiceIntrospection
+  • PicanteIntrospection
+
+UI Tabs:
+  [Traces] [Services] [Picante Graph] [Picante Stats]
+```
+
+**Scenario 3: Multi-Cell Rapace App**
+```
+Connected to: my-app-host
+Discovered services:
+  • ServiceIntrospection
+  • RapaceIntrospection
+
+UI Tabs:
+  [Traces] [Services] [Rapace Topology] [Rapace Metrics]
+```
+
+**Scenario 4: Full Stack (Rapace + Picante + Dodeca)**
+```
+Connected to: dodeca-server
+Discovered services:
+  • ServiceIntrospection
+  • PicanteIntrospection
+  • RapaceIntrospection
+  • DodecaIntrospection
+
+UI Tabs:
+  [Traces] [Services] [Picante Graph] [Rapace Topology] [Dodeca Build]
+```
+
+---
+
+## Examples
+
+### Example 1: Simple Rapace RPC
+
+**App code**:
 ```rust
 use hindsight::Tracer;
-use rapace_transport_tcp::TcpTransport;
+use rapace_cell::run_multi;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to Hindsight via TCP
-    let transport = TcpTransport::connect("localhost:9090").await?;
-    let tracer = Tracer::new(transport).await?;
+async fn main() {
+    // Connect to Hindsight
+    let tracer = Tracer::connect("localhost:9090").await?;
 
-    // Create a span
-    let span = tracer.span("process_request")
-        .with_attribute("user_id", 123)
-        .with_attribute("endpoint", "/api/users")
-        .start();
-
-    // Do work...
-    process_request().await?;
-
-    // End the span (sends to Hindsight)
-    span.end();
-
-    Ok(())
+    // Run cell with introspection
+    run_multi(|builder| {
+        builder
+            .add_service(CalculatorServer::new(calc_impl))
+            .with_introspection()  // ← Exposes ServiceIntrospection
+    })
+    .with_tracer(tracer)  // ← Send spans to Hindsight
+    .await?;
 }
 ```
 
----
-
-## Phase 4: Server Implementation
-
-**Goal:** Implement the HindsightService and serve it via Rapace.
-
-**Crate:** `hindsight-server`
-
-### 4.1 Dependencies
-
-```toml
-[dependencies]
-hindsight-protocol = { path = "../hindsight-protocol" }
-rapace = { path = "../../../rapace/crates/rapace" }
-rapace-transport-tcp = { path = "../../../rapace/crates/rapace-transport-tcp" }
-rapace-transport-websocket = { path = "../../../rapace/crates/rapace-transport-websocket" }
-
-tokio = { version = "1", features = ["full"] }
-facet = { path = "../../../facet" }
-
-# Storage
-dashmap = "5"
-parking_lot = "0.12"
-
-# HTTP (only for serving static HTML)
-axum = { version = "0.7", features = ["ws"] }
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-
-# Tracing (self-instrumentation - NOT sent to Hindsight!)
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-time = "0.3"
-anyhow = "1"
+**What Hindsight sees**:
+```
+1. App connects via TCP
+2. Hindsight calls app.list_services()
+   → Returns: ["ServiceIntrospection", "Calculator"]
+3. Hindsight UI shows:
+   - Traces tab (generic view)
+   - Services tab (lists "Calculator" with methods)
 ```
 
-### 4.2 Storage (`src/storage.rs`)
-
+**When RPC called**:
 ```rust
-use dashmap::DashMap;
-use hindsight_protocol::*;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
-use tokio::sync::broadcast;
-
-/// In-memory trace store with TTL
-pub struct TraceStore {
-    traces: DashMap<TraceId, StoredTrace>,
-    spans: DashMap<SpanId, Span>,
-    ttl: Duration,
-    event_tx: broadcast::Sender<TraceEvent>,
-}
-
-struct StoredTrace {
-    trace: Trace,
-    created_at: SystemTime,
-}
-
-impl TraceStore {
-    pub fn new(ttl: Duration) -> Arc<Self> {
-        let (event_tx, _) = broadcast::channel(1000);
-
-        let store = Arc::new(Self {
-            traces: DashMap::new(),
-            spans: DashMap::new(),
-            ttl,
-            event_tx,
-        });
-
-        // Background task to clean up expired traces
-        let store_weak = Arc::downgrade(&store);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                if let Some(store) = store_weak.upgrade() {
-                    store.cleanup_expired();
-                } else {
-                    break;
-                }
-            }
-        });
-
-        store
-    }
-
-    /// Ingest spans and build/update traces
-    pub fn ingest(&self, spans: Vec<Span>) -> u32 {
-        let count = spans.len() as u32;
-
-        for span in spans {
-            // Check if this is a new trace
-            let is_new_trace = span.parent_span_id.is_none()
-                && !self.spans.contains_key(&span.span_id);
-
-            if is_new_trace {
-                let _ = self.event_tx.send(TraceEvent::TraceStarted {
-                    trace_id: span.trace_id,
-                    root_span_name: span.name.clone(),
-                    service_name: span.service_name.clone(),
-                });
-            }
-
-            // Emit span added event
-            let _ = self.event_tx.send(TraceEvent::SpanAdded {
-                trace_id: span.trace_id,
-                span: span.clone(),
-            });
-
-            self.spans.insert(span.span_id, span.clone());
-
-            // Try to build/update trace
-            self.update_trace(span.trace_id);
-        }
-
-        count
-    }
-
-    /// Get a complete trace by ID
-    pub fn get_trace(&self, trace_id: TraceId) -> Option<Trace> {
-        self.traces.get(&trace_id).map(|entry| entry.trace.clone())
-    }
-
-    /// List traces with filtering
-    pub fn list_traces(&self, filter: TraceFilter) -> Vec<TraceSummary> {
-        let mut summaries: Vec<TraceSummary> = self.traces
-            .iter()
-            .filter_map(|entry| {
-                let trace = &entry.trace;
-
-                // Apply filters
-                if let Some(service) = &filter.service {
-                    if !trace.spans.iter().any(|s| &s.service_name == service) {
-                        return None;
-                    }
-                }
-
-                let duration = trace.end_time.map(|e| e.0 - trace.start_time.0);
-
-                if let Some(min_dur) = filter.min_duration_nanos {
-                    if duration.map_or(true, |d| d < min_dur) {
-                        return None;
-                    }
-                }
-
-                if let Some(max_dur) = filter.max_duration_nanos {
-                    if duration.map_or(false, |d| d > max_dur) {
-                        return None;
-                    }
-                }
-
-                let has_errors = trace.spans.iter().any(|s| matches!(s.status, SpanStatus::Error { .. }));
-
-                if let Some(filter_errors) = filter.has_errors {
-                    if has_errors != filter_errors {
-                        return None;
-                    }
-                }
-
-                let root_span = trace.spans.iter()
-                    .find(|s| s.span_id == trace.root_span_id)?;
-
-                Some(TraceSummary {
-                    trace_id: trace.trace_id,
-                    root_span_name: root_span.name.clone(),
-                    service_name: root_span.service_name.clone(),
-                    start_time: trace.start_time,
-                    duration_nanos: duration,
-                    span_count: trace.spans.len(),
-                    has_errors,
-                })
-            })
-            .collect();
-
-        // Sort by start time (newest first)
-        summaries.sort_by(|a, b| b.start_time.0.cmp(&a.start_time.0));
-
-        // Apply limit
-        let limit = filter.limit.unwrap_or(100);
-        summaries.truncate(limit);
-
-        summaries
-    }
-
-    /// Subscribe to live trace events
-    pub fn subscribe_events(&self) -> broadcast::Receiver<TraceEvent> {
-        self.event_tx.subscribe()
-    }
-
-    fn update_trace(&self, trace_id: TraceId) {
-        // Collect all spans for this trace
-        let spans: Vec<Span> = self.spans
-            .iter()
-            .filter(|entry| entry.value().trace_id == trace_id)
-            .map(|entry| entry.value().clone())
-            .collect();
-
-        if !spans.is_empty() {
-            let trace = Trace::from_spans(spans);
-
-            // Check if trace is complete
-            let is_complete = trace.end_time.is_some()
-                && trace.spans.iter().all(|s| s.end_time.is_some());
-
-            if is_complete {
-                if let Some(duration) = trace.end_time.map(|e| e.0 - trace.start_time.0) {
-                    let _ = self.event_tx.send(TraceEvent::TraceCompleted {
-                        trace_id,
-                        duration_nanos: duration,
-                        span_count: trace.spans.len(),
-                    });
-                }
-            }
-
-            self.traces.insert(trace_id, StoredTrace {
-                trace,
-                created_at: SystemTime::now(),
-            });
-        }
-    }
-
-    fn cleanup_expired(&self) {
-        let now = SystemTime::now();
-        self.traces.retain(|_, stored| {
-            now.duration_since(stored.created_at).unwrap_or_default() < self.ttl
-        });
+// App emits span:
+Span {
+    name: "Calculator.add",
+    method_name: Some("Calculator.add"),
+    method_id: Some(12345),
+    service_name: "my-app",
+    attributes: {
+        "rpc.system": "rapace",
+        "rpc.service": "Calculator",
+        "rpc.method": "add",
     }
 }
 ```
 
-### 4.3 Service Implementation (`src/service_impl.rs`)
+### Example 2: Picante Query
 
+**App code**:
 ```rust
-use hindsight_protocol::*;
-use rapace::Streaming;
-use std::sync::Arc;
-use futures::stream::Stream;
-use std::pin::Pin;
-
-use crate::storage::TraceStore;
-
-pub struct HindsightServiceImpl {
-    store: Arc<TraceStore>,
-}
-
-impl HindsightServiceImpl {
-    pub fn new(store: Arc<TraceStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[rapace::async_trait]
-impl HindsightService for HindsightServiceImpl {
-    async fn ingest_spans(&self, spans: Vec<Span>) -> u32 {
-        // Filter out any spans from Hindsight itself (prevent infinite loop!)
-        let spans: Vec<_> = spans.into_iter()
-            .filter(|span| span.service_name != "hindsight-server")
-            .collect();
-
-        self.store.ingest(spans)
-    }
-
-    async fn get_trace(&self, trace_id: TraceId) -> Option<Trace> {
-        self.store.get_trace(trace_id)
-    }
-
-    async fn list_traces(&self, filter: TraceFilter) -> Vec<TraceSummary> {
-        self.store.list_traces(filter)
-    }
-
-    async fn stream_traces(&self) -> Streaming<TraceEvent> {
-        let mut rx = self.store.subscribe_events();
-
-        let stream = async_stream::stream! {
-            while let Ok(event) = rx.recv().await {
-                yield Ok(event);
-            }
-        };
-
-        Box::pin(stream)
-    }
-
-    async fn ping(&self) -> String {
-        "pong".to_string()
-    }
-}
-```
-
-### 4.4 Main Server (`src/main.rs`)
-
-```rust
-mod storage;
-mod service_impl;
-
-use axum::{response::Html, routing::get, Router};
-use clap::{Parser, Subcommand};
-use hindsight_protocol::*;
-use rapace::RpcSession;
-use rapace_transport_tcp::TcpTransport;
-use rapace_transport_websocket::WebSocketTransport;
-use std::sync::Arc;
-use std::time::Duration;
-
-use crate::service_impl::HindsightServiceImpl;
-use crate::storage::TraceStore;
-
-#[derive(Parser)]
-#[command(name = "hindsight")]
-#[command(about = "Distributed tracing made simple", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Start the trace collection server
-    Serve {
-        /// Port for Rapace TCP transport (for native clients)
-        #[arg(short, long, default_value = "9090")]
-        port: u16,
-
-        /// Port for WebSocket transport (for browser clients)
-        #[arg(short, long, default_value = "9091")]
-        ws_port: u16,
-
-        /// Host to bind to
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-
-        /// TTL for traces in seconds
-        #[arg(long, default_value = "3600")]
-        ttl: u64,
-    },
-}
+use hindsight::Tracer;
+use picante::Runtime;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+async fn main() {
+    let tracer = Tracer::connect("localhost:9090").await?;
+    let runtime = Runtime::new()
+        .with_hindsight_tracer(tracer)
+        .with_introspection();  // ← Exposes PicanteIntrospection
 
-    let cli = Cli::parse();
+    // Run query
+    let result = runtime.query(parse_file("main.rs"));
+}
+```
 
-    match cli.command {
-        Commands::Serve { port, ws_port, host, ttl } => {
-            serve(host, port, ws_port, ttl).await
-        }
+**What Hindsight sees**:
+```
+1. App connects
+2. Hindsight calls app.list_services()
+   → Returns: ["ServiceIntrospection", "PicanteIntrospection"]
+3. Hindsight UI shows:
+   - Traces tab
+   - Services tab
+   - Picante Graph tab  ← NEW!
+   - Picante Stats tab  ← NEW!
+
+4. App sends spans with picante.* attributes
+5. User clicks trace in Hindsight
+6. Hindsight calls app.get_picante_graph(trace_id)
+7. Renders dependency graph with colored nodes
+```
+
+### Example 3: Mixed Trace (Picante → Rapace → Dodeca)
+
+**Scenario**: Dodeca (static site generator) uses Picante for incremental compilation, makes RPC to external markdown service
+
+**Spans emitted**:
+```rust
+// Span 1: Picante query
+Span {
+    trace_id: trace_abc,
+    span_id: span_001,
+    name: "Query::render_markdown",
+    method_name: Some("Query::render_markdown"),
+    service_name: "dodeca",
+    attributes: {
+        "picante.query": true,
+        "picante.query_kind": "render_markdown",
+        "picante.cache_status": "miss",
     }
 }
 
-async fn serve(host: String, port: u16, ws_port: u16, ttl_secs: u64) -> anyhow::Result<()> {
-    tracing::info!("🔍 Hindsight server starting");
-
-    let store = TraceStore::new(Duration::from_secs(ttl_secs));
-    let service = Arc::new(HindsightServiceImpl::new(store));
-
-    // Spawn TCP server (for native clients: TUI, apps, Rapace cells)
-    let service_tcp = service.clone();
-    tokio::spawn(async move {
-        if let Err(e) = serve_tcp(&host, port, service_tcp).await {
-            tracing::error!("TCP server error: {}", e);
-        }
-    });
-
-    // Spawn WebSocket server (for browser WASM clients)
-    let service_ws = service.clone();
-    tokio::spawn(async move {
-        if let Err(e) = serve_websocket(&host, ws_port, service_ws).await {
-            tracing::error!("WebSocket server error: {}", e);
-        }
-    });
-
-    // Serve minimal HTTP server (only for serving the WASM UI)
-    serve_http(&host, ws_port).await?;
-
-    Ok(())
-}
-
-/// Serve Rapace RPC over TCP (for native clients)
-async fn serve_tcp(
-    host: &str,
-    port: u16,
-    service: Arc<HindsightServiceImpl>,
-) -> anyhow::Result<()> {
-    let addr = format!("{}:{}", host, port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    tracing::info!("📡 Rapace TCP server listening on {}", addr);
-
-    loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        tracing::info!("New TCP connection from {}", peer_addr);
-
-        let service = service.clone();
-        tokio::spawn(async move {
-            let transport = Arc::new(TcpTransport::from_stream(stream));
-
-            // IMPORTANT: No tracer attached! (Prevents infinite loop)
-            let session = Arc::new(RpcSession::new(transport));
-
-            let server = HindsightServiceServer::new(service);
-            session.set_dispatcher(server);
-
-            if let Err(e) = session.run().await {
-                tracing::error!("Session error: {}", e);
-            }
-        });
+// Span 2: Rapace RPC (child of Picante query)
+Span {
+    trace_id: trace_abc,
+    span_id: span_002,
+    parent_span_id: Some(span_001),
+    name: "MarkdownService.parse",
+    method_name: Some("MarkdownService.parse"),
+    service_name: "dodeca",
+    attributes: {
+        "rpc.system": "rapace",
+        "rpc.service": "MarkdownService",
     }
 }
 
-/// Serve Rapace RPC over WebSocket (for browser WASM clients)
-async fn serve_websocket(
-    host: &str,
-    port: u16,
-    service: Arc<HindsightServiceImpl>,
-) -> anyhow::Result<()> {
-    let addr = format!("{}:{}", host, port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    tracing::info!("🌐 WebSocket server listening on ws://{}", addr);
-
-    loop {
-        let (stream, peer_addr) = listener.accept().await?;
-
-        let service = service.clone();
-        tokio::spawn(async move {
-            // Accept WebSocket upgrade
-            let ws_stream = match tokio_tungstenite::accept_async(stream).await {
-                Ok(ws) => ws,
-                Err(e) => {
-                    tracing::error!("WebSocket upgrade failed: {}", e);
-                    return;
-                }
-            };
-
-            tracing::info!("New WebSocket connection from {}", peer_addr);
-
-            let transport = Arc::new(WebSocketTransport::new(ws_stream));
-
-            // IMPORTANT: No tracer attached! (Prevents infinite loop)
-            let session = Arc::new(RpcSession::new(transport));
-
-            let server = HindsightServiceServer::new(service);
-            session.set_dispatcher(server);
-
-            if let Err(e) = session.run().await {
-                tracing::error!("WebSocket session error: {}", e);
-            }
-        });
-    }
+// Span 3: Markdown parsing (child of RPC)
+Span {
+    trace_id: trace_abc,
+    span_id: span_003,
+    parent_span_id: Some(span_002),
+    name: "parse_markdown_ast",
+    service_name: "markdown-service",
 }
+```
 
-/// Serve static HTML (only for loading the WASM UI)
-async fn serve_http(host: &str, ws_port: u16) -> anyhow::Result<()> {
-    let app = Router::new()
-        .route("/", get(move || async move {
-            let html = include_str!("ui/index.html")
-                .replace("{{WS_PORT}}", &ws_port.to_string());
-            Html(html)
-        }));
+**Hindsight shows**:
+```
+Trace: render_markdown (Mixed)
 
-    let addr = format!("{}:8080", host);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+Generic View:
+  render_markdown
+    ├─ MarkdownService.parse (RPC)
+    │   └─ parse_markdown_ast
+    └─ (other work)
 
-    tracing::info!("🌍 Web UI available at http://{}", addr);
+Picante View:
+  [🟡 Query: render_markdown]  ← Yellow = cache miss
+      ↓
+  (shows only Picante nodes)
 
-    axum::serve(listener, app).await?;
-    Ok(())
-}
+Rapace View:
+  (shows RPC call with transport metrics)
 ```
 
 ---
 
-## Phase 5: Web UI (WASM + Rapace)
+## Notes from earlier drafts
 
-**Goal:** Browser UI that uses Rapace WebSocket transport.
+### What changed in the unified plan
 
-**Crate:** `hindsight-ui` (new WASM crate)
+**Added**:
+1. ✅ **Bidirectional RPC** - Apps expose services, Hindsight can call them
+2. ✅ **Service Discovery** - Hindsight discovers capabilities via `ServiceIntrospection`
+3. ✅ **Dynamic UI** - UI adapts based on discovered services
+4. ✅ **method_name in Span** - No separate lookup needed for historical traces
+5. ✅ **App-specific services** - PicanteIntrospection, RapaceIntrospection, DodecaIntrospection
+6. ✅ **Real-time data** - Not just historical traces, also live app state
 
-### 5.1 Create New Crate
+**Kept from the original core plan**:
+- ✅ Pure Rapace architecture (no REST APIs)
+- ✅ W3C Trace Context
+- ✅ Multiple transports (TCP, WebSocket, SHM)
+- ✅ Untraced sessions (no infinite loops)
+- ✅ In-memory storage (ephemeral by default)
+- ✅ WASM browser client + TUI
 
-```toml
-# crates/hindsight-ui/Cargo.toml
-[package]
-name = "hindsight-ui"
-version.workspace = true
-edition.workspace = true
+**Incorporated from the Picante integration plan**:
+- ✅ Picante span schema (picante.* attributes)
+- ✅ PicanteGraph types and visualization
+- ✅ Cache status tracking
+- ✅ Dependency graph rendering
+- ✅ Statistics dashboard
 
-[lib]
-crate-type = ["cdylib"]
+**Enhanced**:
+- Service discovery enables extensibility (any framework can add introspection)
+- UI automatically adapts without code changes
+- Apps can expose custom views (Picante query graph, Rapace topology, etc.)
+- Historical traces are self-contained (include method names)
+- Live introspection for current state (active queries, build progress, etc.)
 
-[dependencies]
-hindsight-protocol = { path = "../hindsight-protocol" }
-rapace = { path = "../../../rapace/crates/rapace" }
-rapace-transport-websocket = { path = "../../../rapace/crates/rapace-transport-websocket" }
+### Implementation Order Change
 
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement"] }
-facet = { path = "../../../facet" }
-```
+The original core plan suggested: Protocol → Server → Client → Web UI → TUI → Integrations
 
-### 5.2 WASM Entry Point (`src/lib.rs`)
+This plan suggests:
+1. Core (Phase 1) ← Same
+2. **Service Discovery** (Phase 2) ← NEW, do early!
+3. Generic Web UI (Phase 3) ← Same
+4. **Picante** (Phase 4) ← Higher priority
+5. **Rapace** (Phase 5) ← Higher priority
+6. **Dodeca** (Phase 6) ← Higher priority
+7. TUI (Phase 7) ← Same timing
+8. Streaming (Phase 8) ← Same
 
-```rust
-use wasm_bindgen::prelude::*;
-use hindsight_protocol::*;
-use rapace::RpcSession;
-use rapace_transport_websocket::WebSocketTransport;
-use std::sync::Arc;
-
-#[wasm_bindgen(start)]
-pub async fn main() {
-    // Connect to Hindsight via WebSocket
-    let ws_url = format!("ws://{}/ws", web_sys::window().unwrap().location().host().unwrap());
-
-    let transport = WebSocketTransport::connect(&ws_url).await
-        .expect("Failed to connect to Hindsight");
-
-    let session = Arc::new(RpcSession::new(Arc::new(transport)));
-    let client = HindsightServiceClient::new(session);
-
-    // Load initial traces
-    let traces = client.list_traces(TraceFilter::default()).await
-        .expect("Failed to list traces");
-
-    render_traces(&traces);
-
-    // Stream live updates
-    let mut stream = client.stream_traces().await
-        .expect("Failed to stream traces");
-
-    while let Some(event) = stream.recv().await {
-        handle_event(event);
-    }
-}
-
-fn render_traces(traces: &[TraceSummary]) {
-    // TODO: D3.js rendering (similar to Phase 4 from old plan)
-}
-
-fn handle_event(event: TraceEvent) {
-    // TODO: Update UI based on live events
-}
-```
-
-### 5.3 HTML Template (`src/ui/index.html` in hindsight-server)
-
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hindsight - Distributed Tracing</title>
-    <script type="module">
-        import init from '/hindsight_ui.js';
-        init().then(() => {
-            console.log('Hindsight UI loaded');
-        });
-    </script>
-    <style>
-        /* Styling from old plan */
-    </style>
-</head>
-<body>
-    <div id="app">
-        <div id="sidebar">
-            <h2>Traces</h2>
-            <div id="trace-list"></div>
-        </div>
-        <div id="main">
-            <div id="toolbar">
-                <span id="status">Connecting...</span>
-            </div>
-            <div id="trace-view"></div>
-        </div>
-    </div>
-</body>
-</html>
-```
-
-**Note:** Full WASM implementation is beyond the scope of this plan, but the architecture is established.
+**Rationale**: Service discovery is the foundation for extensibility. Do it early, then integrate frameworks in parallel.
 
 ---
 
-## Phase 6: TUI (Native Rapace)
+## Avoiding Infinite Loops
 
-**Goal:** Terminal UI using native Rapace TCP transport.
-
-**Crate:** `hindsight-tui`
-
-### 6.1 Main App (`src/app.rs`)
+**Still applies!** Hindsight's RPC sessions MUST be untraced:
 
 ```rust
-use crossterm::event::{self, Event, KeyCode};
-use hindsight_protocol::*;
-use rapace::RpcSession;
-use rapace_transport_tcp::TcpTransport;
-use ratatui::{/* ... */};
-use std::sync::Arc;
+// In hindsight-server
+let session = RpcSession::new(transport);
+// ❌ NO .with_tracer() call!
 
-pub struct App {
-    client: HindsightServiceClient,
-    traces: Vec<TraceSummary>,
-    selected_index: usize,
-    selected_trace: Option<Trace>,
-}
-
-impl App {
-    pub async fn new(server_addr: String) -> anyhow::Result<Self> {
-        // Connect via TCP (not HTTP!)
-        let transport = TcpTransport::connect(&server_addr).await?;
-        let session = Arc::new(RpcSession::new(Arc::new(transport)));
-
-        // IMPORTANT: No tracer attached! (TUI doesn't trace itself)
-        let client = HindsightServiceClient::new(session);
-
-        Ok(Self {
-            client,
-            traces: Vec::new(),
-            selected_index: 0,
-            selected_trace: None,
-        })
-    }
-
-    pub async fn run(&mut self) -> anyhow::Result<()> {
-        // Setup terminal
-        // ... (same as old plan)
-
-        // Fetch initial data using Rapace RPC!
-        self.refresh().await?;
-
-        // Event loop
-        // ... (same as old plan)
-    }
-
-    async fn refresh(&mut self) -> anyhow::Result<()> {
-        // Use Rapace RPC instead of HTTP!
-        self.traces = self.client.list_traces(TraceFilter {
-            limit: Some(50),
-            ..Default::default()
-        }).await?;
-
-        if !self.traces.is_empty() {
-            self.select_current_trace().await?;
-        }
-
-        Ok(())
-    }
-
-    async fn select_current_trace(&mut self) -> anyhow::Result<()> {
-        if let Some(summary) = self.traces.get(self.selected_index) {
-            // Use Rapace RPC instead of HTTP!
-            self.selected_trace = self.client.get_trace(summary.trace_id).await?;
-        }
-        Ok(())
-    }
-
-    // ... (rest of TUI implementation from old plan)
-}
+session.set_dispatcher(HindsightServiceServer::new(service));
 ```
 
----
-
-## Phase 7: Integrations
-
-### 7.1 Rapace Integration
-
-**Location:** `rapace-core/src/tracing.rs` (new file, feature-gated)
-
-```rust
-#[cfg(feature = "hindsight")]
-use hindsight::{Tracer, ActiveSpan};
-
-pub struct TracingContext {
-    tracer: Tracer,
-    service_name: String,
-}
-
-impl<T: Transport> RpcSession<T> {
-    /// Attach a Hindsight tracer to this session
-    ///
-    /// ⚠️ WARNING: Do NOT use this on Hindsight's own RPC sessions!
-    /// This will cause infinite loops.
-    ///
-    /// Only use this on application-level sessions.
-    #[cfg(feature = "hindsight")]
-    pub fn with_hindsight_tracer(mut self, tracer: Tracer) -> Self {
-        self.tracing_context = Some(TracingContext {
-            tracer,
-            service_name: std::env::var("SERVICE_NAME")
-                .unwrap_or_else(|_| "rapace-app".to_string()),
-        });
-        self
-    }
-
-    // In call() method:
-    pub async fn call(&self, channel_id: u32, method_id: u32, payload: Bytes)
-        -> Result<ReceivedFrame, RpcError>
-    {
-        #[cfg(feature = "hindsight")]
-        let _span = if let Some(ctx) = &self.tracing_context {
-            let method_name = self.method_registry
-                .lookup(method_id)
-                .unwrap_or_else(|| format!("method_{}", method_id));
-
-            Some(ctx.tracer.span(format!("RPC: {}", method_name))
-                .with_attribute("channel_id", channel_id as i64)
-                .with_attribute("method_id", method_id as i64)
-                .start())
-        } else {
-            None
-        };
-
-        // ... existing call logic ...
-
-        #[cfg(feature = "hindsight")]
-        if let Some(span) = _span {
-            if result.is_err() {
-                span.set_error(format!("{:?}", result));
-            }
-            span.end();
-        }
-
-        result
-    }
-}
-```
-
-**Usage:**
-```rust
-// Application code (NOT Hindsight itself!)
-let tracer = hindsight::Tracer::new(tcp_transport).await?;
-
-let session = RpcSession::new(app_transport)
-    .with_hindsight_tracer(tracer); // ✅ OK for application sessions
-
-// ❌ DON'T do this in Hindsight server:
-// let session = RpcSession::new(transport)
-//     .with_hindsight_tracer(tracer); // ❌ INFINITE LOOP!
-```
-
-### 7.2 Picante Integration
-
-**Location:** `picante/src/runtime.rs`
-
-```rust
-impl Runtime {
-    #[cfg(feature = "hindsight")]
-    pub fn with_hindsight_tracer(mut self, tracer: hindsight::Tracer) -> Self {
-        self.hindsight_tracer = Some(tracer);
-        self
-    }
-}
-
-// In query execution:
-#[cfg(feature = "hindsight")]
-if let Some(tracer) = &db.runtime().hindsight_tracer {
-    let _span = tracer.span(format!("Query: {}", query_kind_name))
-        .with_attribute("cache_hit", cache_hit)
-        .with_attribute("revision", revision as i64)
-        .start();
-
-    // ... execute query ...
-
-    _span.end(); // Sends to Hindsight
-}
-```
-
-**Usage:**
-```rust
-let tracer = hindsight::Tracer::new(tcp_transport).await?;
-
-let runtime = Runtime::new()
-    .with_hindsight_tracer(tracer); // ✅ Traces all query executions
-```
+**Additional consideration**: When Hindsight calls back to apps (e.g., `app.get_picante_graph()`), those calls should also be untraced to avoid clutter.
 
 ---
 
 ## Testing Strategy
 
 ### Unit Tests
-- `hindsight-protocol`: Trace context parsing, span serialization
-- `hindsight`: Span builder API, batching logic
-- `hindsight-server`: Storage, TTL cleanup, event broadcasting
+- `hindsight-protocol`: Serialize/deserialize all types
+- `hindsight-server`: Storage, classification, discovery logic
+- `rapace-introspection`: DefaultServiceIntrospection
 
 ### Integration Tests
+- App connects → Hindsight discovers services → correct UI state
+- Send spans → classify trace type → retrieve via get_trace()
+- Picante app → get_query_graph() → valid graph structure
+- Mixed trace → correct parent/child relationships
 
-```rust
-#[tokio::test]
-async fn test_end_to_end_rapace_trace() {
-    // Start Hindsight server
-    let store = TraceStore::new(Duration::from_secs(3600));
-    let service = Arc::new(HindsightServiceImpl::new(store));
-
-    // Create in-memory transport (for testing)
-    let (client_transport, server_transport) = create_test_transport_pair();
-
-    // Server side
-    let session = Arc::new(RpcSession::new(server_transport));
-    session.set_dispatcher(HindsightServiceServer::new(service.clone()));
-    tokio::spawn(session.run());
-
-    // Client side
-    let tracer = Tracer::new(client_transport).await.unwrap();
-
-    // Send a span
-    let span = tracer.span("test_operation").start();
-    span.end();
-
-    // Wait for batching
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Query via Rapace RPC (not HTTP!)
-    let client = HindsightServiceClient::new(session.clone());
-    let traces = client.list_traces(TraceFilter::default()).await.unwrap();
-
-    assert_eq!(traces.len(), 1);
-    assert_eq!(traces[0].root_span_name, "test_operation");
-}
-```
+### End-to-End Tests
+1. **Generic app**: Send spans, view in browser, see generic waterfall
+2. **Picante app**: Send query spans, see dependency graph with colors
+3. **Multi-cell app**: See Rapace topology with live RPC calls
+4. **Full stack**: Dodeca + Picante + Rapace, all views visible
 
 ### Manual Testing
+- Connect with TUI: `hindsight-tui --connect localhost:1991` (raw TCP)
+- Connect with browser: http://localhost:1990 (HTTP + WebSocket)
+- Run demo apps (one per framework)
+- Verify UI tabs appear/disappear correctly
 
-1. **Start server:**
-   ```bash
-   cargo run -p hindsight-server -- serve
-   ```
-
-2. **Run TUI:**
-   ```bash
-   cargo run -p hindsight-tui -- --connect tcp://localhost:9090
-   ```
-
-3. **Run example app:**
-   ```bash
-   cargo run --example traced-app
-   ```
-
-4. **Open browser:**
-   ```
-   http://localhost:8080
-   ```
+### Current Testing (Phase 1-2 Complete)
+✅ **End-to-end verified**:
+- `cargo run -p hindsight-server -- serve` (ports 1990-1991)
+- `cargo run -p hindsight --example simple_client` (10 spans)
+- `cargo run -p hindsight --example test_classification` (5 trace types)
+- `cargo run -p hindsight --example query_traces` (verify classification)
 
 ---
 
-## Future Enhancements
+## Future Enhancements (from PLAN.md + new ideas)
 
-1. **Persistent Storage**
-   - SQLite backend for long-term storage
-   - Configurable via `--storage=sqlite://traces.db`
+### Persistence
+- SQLite storage (optional)
+- Query historical traces beyond current session
+- Indexing by service, time range, trace type
 
-2. **Sampling**
-   - Server-side sampling (% of traces)
-   - Head-based and tail-based sampling
+### Sampling
+- Only send 1% of traces
+- Configurable sampling rate per service
 
-3. **Export Formats**
-   - Jaeger format
-   - Zipkin format
-   - OpenTelemetry OTLP
+### Export
+- Export trace as JSON
+- Export Picante graph as DOT/SVG
+- Export statistics as CSV
 
-4. **Advanced Filtering**
-   - Query by span attributes
-   - Full-text search in span names
+### Alerting
+- "Cache hit rate below 50%" → notify
+- "RPC call taking > 1s" → alert
+- Custom rules via config file
 
-5. **Alerting**
-   - Threshold-based alerts (latency > X, error rate > Y)
-   - Webhook notifications
+### Multi-Hindsight
+- Multiple Hindsight instances
+- Forward traces to central collector
+- Distributed topology view
 
-6. **SHM Transport**
-   - For ultra-low-latency same-machine tracing
-   - Perfect for Picante → Hindsight on dev machines
-
----
-
-## Avoiding Infinite Loops - Summary
-
-### The Rule
-
-**Hindsight's own RPC sessions MUST NOT have a tracer attached.**
-
-### How to Ensure This
-
-1. **In Hindsight server:** Never call `.with_hindsight_tracer()` on sessions
-2. **In applications:** Only trace application-level sessions, not Hindsight client sessions
-3. **Service filtering:** Filter out `HindsightService` from tracing
-4. **Server-side filtering:** Hindsight rejects spans with `service_name == "hindsight-server"`
-
-### Example (Correct)
-
-```rust
-// Application that uses both Hindsight (for tracing) AND Rapace (for business logic)
-
-// Tracer for sending spans (uses one Rapace session internally)
-let hindsight_transport = TcpTransport::connect("localhost:9090").await?;
-let tracer = Tracer::new(hindsight_transport).await?; // ✅ No tracer on this!
-
-// Application RPC session (traced)
-let app_transport = TcpTransport::connect("localhost:5000").await?;
-let app_session = RpcSession::new(app_transport)
-    .with_hindsight_tracer(tracer); // ✅ Traces business logic RPCs
-
-// Use app_session normally - all RPCs will be traced!
-```
+### Time-Travel Debugging
+- Record all query executions
+- "Replay" trace with different inputs
+- Compare "before" vs "after" dependency graphs
 
 ---
 
-## File Checklist
+## Summary
 
-- [x] `README.md`
-- [x] `Cargo.toml` (workspace)
-- [x] `.gitignore`
-- [x] `LICENSE-MIT`, `LICENSE-APACHE`
-- [x] `.github/workflows/ci.yml`
-- [x] `crates/hindsight-protocol/` - Protocol, service definition
-- [x] `crates/hindsight/` - Client library
-- [x] `crates/hindsight-server/` - Server implementation
-- [x] `crates/hindsight-tui/` - TUI client
-- [ ] `crates/hindsight-ui/` - WASM web UI (to be created)
-- [x] `PLAN.md`
+**Hindsight v3** is the **unified observability hub** for all bearcove tools:
+
+1. **Pure Rapace** - Dogfooding, efficient binary protocol
+2. **Bidirectional** - Apps push traces, Hindsight pulls app data
+3. **Extensible** - Service discovery enables framework-specific views
+4. **Self-Contained Traces** - Include method names, work offline
+5. **Live Introspection** - Not just historical traces, current state too
+6. **Dynamic UI** - Adapts automatically based on discovered capabilities
+
+**One UI, many frameworks, zero config.**
 
 ---
 
-## Getting Started (For New Contributors)
+**Next Steps**:
+1. ✅ ~~Finalize this plan (review + approval)~~
+2. ✅ ~~Implement Phase 1 (core Hindsight)~~
+3. ✅ ~~Implement Phase 2 (trace classification)~~
+4. 🚧 **NEXT**: Implement Phase 2.5 (HTTP Upgrade for Rapace) - optional
+5. 🚧 **NEXT**: Build generic Web UI (Phase 3) - highest value now!
+6. ⏳ Integrate Picante (Phase 4) - query graphs
+7. ⏳ Integrate Rapace (Phase 5) - topology
+8. ⏳ Integrate Dodeca (Phase 6) - build progress
+9. ⏳ Polish TUI (Phase 7)
+10. ⏳ Add streaming (Phase 8)
 
-1. **Read the README** to understand the project vision
-2. **Understand the "Avoiding Infinite Loops" section** - this is critical!
-3. **Start with Phase 1** (protocol) - foundation for everything
-4. **Phase 2** (Rapace service definition) - defines the RPC interface
-5. **Phase 3** (client library) - test with simple examples
-6. **Phase 4** (server) - get it serving via TCP and WebSocket
-7. **Phase 5-6** (UI) - polish the visualization
+**Estimated Remaining Time**: 18-28 days (2 phases complete!)
 
-The goal is a working MVP by the end of Phase 4, with UI in Phases 5-6.
+---
 
-**Key Principle:** Everything uses Rapace RPC. No HTTP APIs except serving the HTML page.
+**Authors**:
+- Claude (Sonnet 4.5) - Plan synthesis & implementation
+- Bearcove team - Architecture decisions
 
-Happy hacking! 🚀
+**Status**: ✅ **Phases 1-2 Complete** - Core functionality working!
+
+**Current State**:
+- ✅ Protocol & types (W3C trace context, spans, traces)
+- ✅ Server (3 transports: HTTP, WebSocket, TCP on ports 1990-1991)
+- ✅ Client library (tracer, span builder, batching)
+- ✅ Trace classification (5 types: Generic, Picante, Rapace, Dodeca, Mixed)
+- ✅ In-memory storage with TTL
+- ✅ Live event streaming
+- ✅ Out-of-order span handling
+- ✅ End-to-end verified with examples
+
+**Dependencies**:
+- ✅ Service discovery (rapace-registry, rapace-introspection)
+- ✅ Hindsight core implementation (Phases 1-2)
+- ⏳ Framework introspection implementations (Picante, Dodeca, Rapace extensions)
+- ⏳ Web UI (WASM + visualization libs)

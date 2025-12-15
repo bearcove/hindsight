@@ -2,68 +2,60 @@
 
 [![MIT + Apache 2.0](https://img.shields.io/badge/license-MIT%20%2B%20Apache%202.0-blue)](./LICENSE-MIT)
 
-**Distributed tracing made simple.** A standalone trace collection server and visualization platform for Rust applications.
+**Unified observability hub for Bearcove tools.** Distributed tracing + live introspection over **Rapace RPC**.
+
+## Status
+
+This repo is under active development. The README is the short synthesis of the current plan; `PLAN.md` is the detailed design doc/spec.
 
 ## What is Hindsight?
 
-Hindsight is a **tracing server** that collects W3C Trace Context spans from any application and provides beautiful visualization:
+Hindsight is a **trace collection server + UI** that:
+- collects W3C Trace Context spans from apps (via Rapace RPC transports),
+- discovers app capabilities at runtime (service introspection),
+- and adapts its UI dynamically (generic trace views + framework-specific views).
 
-- 🔥 **Flamegraph view** - See where time is actually spent
-- 🌳 **Trace tree** - Navigate parent-child span relationships
-- 📊 **Waterfall timeline** - Visualize parallel execution and latency
-- 💻 **TUI mode** - SSH-friendly terminal UI with `ratatui`
+The goal is one place to debug:
+- **Rapace** (RPC): topology, transport metrics, active calls
+- **Picante** (incremental): query graphs, cache hits/misses/validation
+- **Dodeca** (build): build progress, pages, template stats
 
 ## Philosophy
 
-**Simple, not SimplifiedTM.** Hindsight does one thing well: collect traces and show them to you. No complex configuration, no vendor lock-in, no heavyweight collectors.
+**Pure Rapace.** One protocol end-to-end. HTTP exists only to serve a tiny static page that loads the browser UI; trace data flows over Rapace.
 
-**Language agnostic.** Any language that can send HTTP can send spans to Hindsight. Rust, JavaScript, Python, Go—it doesn't matter.
+**Extensible by discovery.** Apps expose introspection services; Hindsight calls `ServiceIntrospection.list_services()` and enables views accordingly.
 
-**Ephemeral by default.** Traces are kept in memory with a TTL. This keeps Hindsight fast and simple. Need persistence? Optional disk storage is available.
+**Ephemeral by default.** In-memory storage with TTL (persistence/export are planned).
 
-**W3C Trace Context compatible.** Works with OpenTelemetry, Jaeger, and any other tracing system that uses W3C trace context.
+**Avoid self-tracing loops.** Hindsight’s own Rapace sessions are untraced; tracing in apps is explicit opt-in.
 
 ## Quick Start
 
-**Install:**
+### Run locally (recommended for now)
+
 ```bash
-cargo install hindsight
+cargo run -p hindsight-server -- serve
 ```
 
-**Run the server:**
+Defaults:
+- **Single port**: `http://127.0.0.1:1990`
+  - `GET /` serves the web UI bootstrap page
+  - `Upgrade: websocket` upgrades to WebSocket → Rapace RPC (browser/WASM)
+  - `Upgrade: rapace` upgrades to raw Rapace (native clients)
+
+### Install the server binary (local path)
+
 ```bash
-hindsight serve --port 9090
+cargo install --path crates/hindsight-server
+hindsight serve
 ```
 
-**Or use the TUI:**
-```bash
-hindsight tui --connect localhost:9090
-```
-
-**Instrument your Rust app:**
-```rust
-use hindsight::Tracer;
-
-#[tokio::main]
-async fn main() {
-    let tracer = Tracer::connect("http://localhost:9090").await?;
-
-    let span = tracer.span("processing_request")
-        .with_attribute("user_id", 123)
-        .start();
-
-    // Do work...
-    do_expensive_work().await?;
-
-    span.end();
-}
-```
-
-Navigate to `http://localhost:9090` and see your traces!
+Then open `http://127.0.0.1:1990`.
 
 ## Integration with Bearcove Projects
 
-Hindsight has first-class integrations with the Bearcove ecosystem:
+Hindsight’s plan is to provide **generic tracing** plus **framework-specific views** when the app exposes introspection services.
 
 ### Rapace (RPC Framework)
 
@@ -71,7 +63,10 @@ Hindsight has first-class integrations with the Bearcove ecosystem:
 use rapace::RpcSession;
 use hindsight::Tracer;
 
-let tracer = Tracer::connect("http://localhost:9090").await?;
+// Create a tracer that exports spans to Hindsight.
+// (Transport setup omitted here for brevity.)
+let tracer = /* ... */;
+
 let session = RpcSession::new(transport)
     .with_tracer(tracer); // Automatic RPC span tracking!
 
@@ -85,9 +80,9 @@ session.call(method_id, payload).await?;
 use picante::Runtime;
 use hindsight::Tracer;
 
-let tracer = Tracer::connect("http://localhost:9090").await?;
+let tracer = /* ... */;
 let runtime = Runtime::new()
-    .with_tracer(tracer); // Automatic query execution tracking!
+    .with_tracer(tracer); // Planned: emit spans with picante.* attributes
 
 // Query execution shows up as spans
 let result = db.my_query.get(&db, key).await?;
@@ -98,7 +93,7 @@ let result = db.my_query.get(&db, key).await?;
 ```rust
 use hindsight::Tracer;
 
-let tracer = Tracer::connect("http://localhost:9090").await?;
+let tracer = /* ... */;
 
 // See your entire build pipeline traced:
 // File change → Markdown parse → Image optimization → Template render
@@ -107,46 +102,38 @@ let tracer = Tracer::connect("http://localhost:9090").await?;
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│            Hindsight Server                     │
-├─────────────────────────────────────────────────┤
-│  Ingestion:  HTTP POST, WebSocket, Rapace RPC  │
-│  Storage:    In-memory (TTL) + optional disk    │
-│  Query API:  REST + WebSocket for live updates  │
-│  UI:         Embedded web UI + TUI              │
-└─────────────────────────────────────────────────┘
-        ▲                            │
-        │ W3C Trace Context          │
-        │ (traceparent header)       │ HTTP/WS
-        │                            ▼
-┌───────┴────────┬──────────┬────────────────┐
-│ Your Rust App  │  Rapace  │  Picante      │
-│ (hindsight)    │  (opt-in)│  (opt-in)     │
-└────────────────┴──────────┴────────────────┘
+Apps (native / WASM)                     Hindsight (hub)
+┌─────────────────────────┐              ┌──────────────────────────┐
+│ App emits spans          │──Rapace RPC─▶│ HindsightService         │
+│ + exposes introspection  │              │ - ingest_spans           │
+│ services (optional)      │◀─Rapace RPC──│ - list/get/stream traces │
+└─────────────────────────┘              │                          │
+                                         │ UI adapts based on:      │
+                                         │ - ServiceIntrospection   │
+                                         │ - PicanteIntrospection   │
+                                         │ - RapaceIntrospection    │
+                                         │ - DodecaIntrospection    │
+                                         └──────────────────────────┘
 ```
 
 ## Workspace Structure
 
 ```
 crates/
-├── hindsight/          # Client library (send spans)
-├── hindsight-server/   # Server binary (collect + serve)
-├── hindsight-tui/      # TUI client (ratatui)
-├── hindsight-protocol/ # Shared span protocol
-└── hindsight-ui/       # Web UI (embedded)
+├── hindsight/          # Client library (emit/export spans)
+├── hindsight-server/   # Server binary (`hindsight`)
+├── hindsight-tui/      # TUI client (planned; currently a stub)
+└── hindsight-protocol/ # Shared protocol types + RPC service trait
 ```
 
 ## Features
 
-- ✅ **W3C Trace Context** - Standard `traceparent`/`tracestate` headers
-- ✅ **Zero config** - Works out of the box
-- ✅ **Fast** - In-memory storage, optimized for dev workflows
-- ✅ **Beautiful UI** - Modern web interface + terminal TUI
-- ✅ **Live updates** - WebSocket streaming of new spans
-- ✅ **Multi-protocol** - HTTP, WebSocket, Rapace RPC ingestion
-- 🚧 **Persistent storage** - Optional disk/DB backend (planned)
-- 🚧 **Sampling** - Configurable trace sampling (planned)
-- 🚧 **Export** - Export to Jaeger/Zipkin format (planned)
+- ✅ **W3C Trace Context** (`traceparent`/`tracestate`)
+- ✅ **Pure Rapace RPC ingestion** (TCP + WebSocket transport)
+- ✅ **Ephemeral in-memory store** (TTL)
+- 🚧 **Service discovery driven UI** (planned: dynamic tabs per app capabilities)
+- 🚧 **Framework-specific views** (Picante/Rapace/Dodeca via introspection)
+- 🚧 **Persistence / sampling / export** (planned)
 
 ## Example: Distributed Trace Across Systems
 
@@ -183,17 +170,16 @@ cargo test --workspace
 
 **Run the server locally:**
 ```bash
-cargo run -p hindsight-server -- serve --port 9090
+cargo run -p hindsight-server -- serve
 ```
 
-**Run the TUI:**
-```bash
-cargo run -p hindsight-tui -- --connect localhost:9090
-```
+**Plan/spec docs:**
+- `UNIFIED_PLAN.md` (short synthesis)
+- `PLAN.md` (detailed design doc/spec)
 
 ## Contributing
 
-See [PLAN.md](./PLAN.md) for the detailed implementation plan.
+See `PLAN.md` for the detailed design doc/spec, and `UNIFIED_PLAN.md` for the short synthesis.
 
 Contributions welcome! Please open issues and PRs.
 
