@@ -2,10 +2,10 @@ mod storage;
 mod service_impl;
 
 use axum::{
-    extract::{Request, WebSocketUpgrade},
+    extract::{Path, Request, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::get,
+    response::{Html, IntoResponse, Response, Json},
+    routing::{get, post},
     Router,
 };
 use hindsight_protocol::*;
@@ -93,6 +93,9 @@ async fn serve_http_unified(
                 handle_root(headers, ws, req, service.clone())
             }
         }))
+        .route("/api/traces", get(list_traces_handler))
+        .route("/api/traces/:trace_id", get(get_trace_handler))
+        .route("/app.js", get(serve_js))
         .with_state(service);
 
     let addr = format!("{}:{}", host, port);
@@ -135,8 +138,8 @@ async fn handle_root(
             handle_rapace_upgrade(req, service).await.into_response()
         }
         _ => {
-            // Normal HTTP - serve HTML
-            let html = include_str!("ui/index.html");
+            // Normal HTTP - serve trace viewer UI
+            let html = include_str!("ui/app.html");
             Html(html).into_response()
         }
     }
@@ -220,4 +223,109 @@ async fn handle_rapace_connection(upgraded: Upgraded, service: Arc<HindsightServ
     if let Err(e) = session.run().await {
         tracing::error!("Rapace HTTP upgrade session error: {}", e);
     }
+}
+
+/// REST API handler: List traces
+async fn list_traces_handler(
+    State(service): State<Arc<HindsightServiceImpl>>,
+) -> Json<serde_json::Value> {
+    let filter = TraceFilter {
+        service: None,
+        min_duration_nanos: None,
+        max_duration_nanos: None,
+        has_errors: None,
+        limit: Some(100),
+    };
+
+    let summaries = service.list_traces(filter).await;
+
+    // Convert to JSON
+    let traces: Vec<serde_json::Value> = summaries.iter().map(|s| {
+        serde_json::json!({
+            "trace_id": s.trace_id.to_hex(),
+            "root_span_name": s.root_span_name,
+            "service_name": s.service_name,
+            "start_time_nanos": s.start_time.0,
+            "duration_nanos": s.duration_nanos,
+            "span_count": s.span_count,
+            "error_count": if s.has_errors { 1 } else { 0 },
+            "trace_type": format!("{:?}", s.trace_type),
+        })
+    }).collect();
+
+    Json(serde_json::json!({
+        "traces": traces,
+        "total": summaries.len(),
+    }))
+}
+
+/// REST API handler: Get trace by ID
+async fn get_trace_handler(
+    State(service): State<Arc<HindsightServiceImpl>>,
+    Path(trace_id): Path<String>,
+) -> Json<serde_json::Value> {
+    // Parse trace ID from hex string
+    let trace_id = match TraceId::from_hex(&trace_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(serde_json::json!({
+                "error": "Invalid trace ID format",
+            }));
+        }
+    };
+
+    match service.get_trace(trace_id).await {
+        Some(trace) => {
+            // Convert trace to JSON
+            let spans: Vec<serde_json::Value> = trace.spans.iter().map(|s| {
+                let attributes: Vec<serde_json::Value> = s.attributes.iter().map(|(k, v)| {
+                    let value_json = match v {
+                        AttributeValue::String(s) => serde_json::Value::String(s.clone()),
+                        AttributeValue::Int(i) => serde_json::json!(i),
+                        AttributeValue::Float(f) => serde_json::json!(f),
+                        AttributeValue::Bool(b) => serde_json::Value::Bool(*b),
+                    };
+                    serde_json::json!({
+                        "key": k,
+                        "value": value_json,
+                    })
+                }).collect();
+
+                serde_json::json!({
+                    "trace_id": s.trace_id.to_hex(),
+                    "span_id": s.span_id.to_hex(),
+                    "parent_span_id": s.parent_span_id.map(|id| id.to_hex()),
+                    "name": s.name,
+                    "service_name": s.service_name,
+                    "start_time_nanos": s.start_time.0,
+                    "end_time_nanos": s.end_time.map(|t| t.0),
+                    "duration_nanos": s.duration_nanos(),
+                    "attributes": attributes,
+                })
+            }).collect();
+
+            Json(serde_json::json!({
+                "trace": {
+                    "trace_id": trace.trace_id.to_hex(),
+                    "root_span_id": trace.root_span_id.to_hex(),
+                    "trace_type": format!("{:?}", trace.classify_type()),
+                    "spans": spans,
+                }
+            }))
+        }
+        None => {
+            Json(serde_json::json!({
+                "error": "Trace not found",
+            }))
+        }
+    }
+}
+
+/// Serve JavaScript file
+async fn serve_js() -> impl IntoResponse {
+    let js = include_str!("ui/app.js");
+    Response::builder()
+        .header("Content-Type", "application/javascript")
+        .body(js.to_string())
+        .unwrap()
 }
