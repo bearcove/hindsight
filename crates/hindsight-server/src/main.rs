@@ -36,7 +36,13 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Initialize tracing with INFO level by default if RUST_LOG is not set
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let cli = Cli::parse();
 
@@ -47,6 +53,14 @@ async fn main() -> anyhow::Result<()> {
             host,
             ttl,
             seed,
-        } => hindsight_server::run_server(host, http_port, tcp_port, ttl, seed).await,
+        } => {
+            eprintln!("🔍 Hindsight server starting...");
+            eprintln!("   HTTP/WebSocket: http://{}:{}", if host == "0.0.0.0" { "localhost" } else { &host }, http_port);
+            eprintln!("   Rapace TCP: {}:{}", host, tcp_port);
+            if seed {
+                eprintln!("   Seed data: enabled");
+            }
+            hindsight_server::run_server(host, http_port, tcp_port, ttl, seed).await
+        }
     }
 }

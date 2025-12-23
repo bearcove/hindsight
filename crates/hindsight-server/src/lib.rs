@@ -85,7 +85,7 @@ async fn serve_tcp(
                 Box::pin(async move {
                     let server = HindsightServiceServer::new(service_impl);
                     server
-                        .dispatch(frame.desc.method_id, frame.payload_bytes())
+                        .dispatch(frame.desc.method_id, &frame)
                         .await
                 })
             });
@@ -225,7 +225,7 @@ async fn handle_rapace_tcp(tcp_stream: tokio::net::TcpStream, service: Arc<Hinds
         Box::pin(async move {
             let server = HindsightServiceServer::new(service_impl);
             server
-                .dispatch(frame.desc.method_id, frame.payload_bytes())
+                .dispatch(frame.desc.method_id, &frame)
                 .await
         })
     });
@@ -321,7 +321,7 @@ async fn handle_rapace_connection(upgraded: Upgraded, service: Arc<HindsightServ
         Box::pin(async move {
             let server = HindsightServiceServer::new(service_impl);
             server
-                .dispatch(frame.desc.method_id, frame.payload_bytes())
+                .dispatch(frame.desc.method_id, &frame)
                 .await
         })
     });

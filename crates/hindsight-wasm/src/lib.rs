@@ -217,7 +217,7 @@ fn App() -> View {
 }
 
 /// Initialize the Rapace client connection
-async fn init_client() -> Result<HindsightServiceClient<WebSocketTransport>, String> {
+async fn init_client() -> Result<HindsightServiceClient, String> {
     let protocol = if web_sys::window()
         .and_then(|w| w.location().protocol().ok())
         .map(|p| p == "https:")
@@ -236,14 +236,14 @@ async fn init_client() -> Result<HindsightServiceClient<WebSocketTransport>, Str
 
     tracing::info!("Connecting to {}", url);
 
-    let transport = WebSocketTransport::connect(&url)
+    let ws = WebSocketTransport::connect(&url)
         .await
         .map_err(|e| format!("Transport error: {:?}", e))?;
 
     tracing::debug!("WebSocket transport connected");
 
-    let transport = Arc::new(transport);
-    let session = Arc::new(RpcSession::with_channel_start(transport.clone(), 2));
+    let transport = rapace::Transport::WebSocket(ws);
+    let session = Arc::new(RpcSession::with_channel_start(transport, 2));
 
     tracing::debug!("RPC session created with channel_start=2");
 
