@@ -99,27 +99,38 @@ pub fn TraceDetail(props: TraceDetailProps) -> View {
         let error = error.clone();
         let trace_id = trace_id.clone();
 
-        spawn_local(async move {
-            match init_client().await {
-                Ok(client) => match client.get_trace(trace_id).await {
-                    Ok(Some(t)) => {
-                        trace.set(Some(t));
-                        loading.set(false);
-                    }
-                    Ok(None) => {
-                        error.set(Some("Trace not found".to_string()));
-                        loading.set(false);
-                    }
+        create_effect(move || {
+            spawn_local(async move {
+                match init_client().await {
+                    Ok(client) => match client.get_trace(trace_id).await {
+                        Ok(Some(t)) => {
+                            // Defer signal updates to avoid borrow conflicts during render
+                            spawn_local(async move {
+                                trace.set(Some(t));
+                                loading.set(false);
+                            });
+                        }
+                        Ok(None) => {
+                            spawn_local(async move {
+                                error.set(Some("Trace not found".to_string()));
+                                loading.set(false);
+                            });
+                        }
+                        Err(e) => {
+                            spawn_local(async move {
+                                error.set(Some(format!("Error fetching trace: {:?}", e)));
+                                loading.set(false);
+                            });
+                        }
+                    },
                     Err(e) => {
-                        error.set(Some(format!("Error fetching trace: {:?}", e)));
-                        loading.set(false);
+                        spawn_local(async move {
+                            error.set(Some(format!("Connection error: {}", e)));
+                            loading.set(false);
+                        });
                     }
-                },
-                Err(e) => {
-                    error.set(Some(format!("Connection error: {}", e)));
-                    loading.set(false);
                 }
-            }
+            });
         });
     }
 
