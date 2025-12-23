@@ -24,9 +24,9 @@
 //! }
 //! ```
 
-mod tracer;
 mod span_builder;
+mod tracer;
 
-pub use tracer::{Tracer, TracerError};
-pub use span_builder::{SpanBuilder, ActiveSpan, IntoAttributeValue};
 pub use hindsight_protocol::*;
+pub use span_builder::{ActiveSpan, IntoAttributeValue, SpanBuilder};
+pub use tracer::{Tracer, TracerError};

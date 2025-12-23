@@ -1,11 +1,11 @@
 //! Trace detail view component
 
-use sycamore::prelude::*;
 use hindsight_protocol::*;
-use wasm_bindgen_futures::spawn_local;
-use std::sync::Arc;
 use rapace::{RpcSession, WebSocketTransport};
 use std::collections::HashMap;
+use std::sync::Arc;
+use sycamore::prelude::*;
+use wasm_bindgen_futures::spawn_local;
 
 use crate::navigation::NavigationState;
 use crate::routing::Route;
@@ -28,7 +28,10 @@ impl SpanNode {
         for span in &trace.spans {
             span_map.insert(span.span_id, span);
             if let Some(parent_id) = span.parent_span_id {
-                children_map.entry(parent_id).or_default().push(span.span_id);
+                children_map
+                    .entry(parent_id)
+                    .or_default()
+                    .push(span.span_id);
             } else {
                 roots.push(span.span_id);
             }
@@ -47,9 +50,8 @@ impl SpanNode {
             if let Some(child_ids) = children_map.get(&span_id) {
                 // Sort children by start time
                 let mut sorted_children = child_ids.clone();
-                sorted_children.sort_by_key(|id| {
-                    span_map.get(id).map(|s| s.start_time.0).unwrap_or(0)
-                });
+                sorted_children
+                    .sort_by_key(|id| span_map.get(id).map(|s| s.start_time.0).unwrap_or(0));
 
                 for child_id in sorted_children {
                     children.push(build_tree(child_id, span_map, children_map, depth + 1));

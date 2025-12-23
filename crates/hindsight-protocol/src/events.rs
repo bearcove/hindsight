@@ -22,8 +22,5 @@ pub enum TraceEvent {
     },
 
     /// New span added to a trace
-    SpanAdded {
-        trace_id: TraceId,
-        span: Span,
-    },
+    SpanAdded { trace_id: TraceId, span: Span },
 }

@@ -40,6 +40,12 @@ impl fmt::Debug for TraceId {
     }
 }
 
+impl Default for TraceId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 8-byte span ID (64 bits)
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Facet)]
 pub struct SpanId(pub [u8; 8]);
@@ -76,6 +82,12 @@ impl fmt::Display for SpanId {
 impl fmt::Debug for SpanId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "SpanId({})", self.to_hex())
+    }
+}
+
+impl Default for SpanId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -122,8 +134,7 @@ impl TraceContext {
 
         let trace_id = TraceId::from_hex(parts[1])?;
         let span_id = SpanId::from_hex(parts[2])?;
-        let flags = u8::from_str_radix(parts[3], 16)
-            .map_err(|_| TraceContextError::InvalidHex)?;
+        let flags = u8::from_str_radix(parts[3], 16).map_err(|_| TraceContextError::InvalidHex)?;
 
         Ok(Self {
             trace_id,

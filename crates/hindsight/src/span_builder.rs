@@ -33,8 +33,13 @@ impl SpanBuilder {
     }
 
     /// Add an attribute to the span
-    pub fn with_attribute(mut self, key: impl Into<String>, value: impl IntoAttributeValue) -> Self {
-        self.attributes.insert(key.into(), value.into_attribute_value());
+    pub fn with_attribute(
+        mut self,
+        key: impl Into<String>,
+        value: impl IntoAttributeValue,
+    ) -> Self {
+        self.attributes
+            .insert(key.into(), value.into_attribute_value());
         self
     }
 

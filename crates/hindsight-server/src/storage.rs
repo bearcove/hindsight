@@ -51,8 +51,8 @@ impl TraceStore {
 
         for span in spans {
             // Check if this is a new trace
-            let is_new_trace = span.parent_span_id.is_none()
-                && !self.spans.contains_key(&span.span_id);
+            let is_new_trace =
+                span.parent_span_id.is_none() && !self.spans.contains_key(&span.span_id);
 
             if is_new_trace {
                 let _ = self.event_tx.send(TraceEvent::TraceStarted {
@@ -84,7 +84,8 @@ impl TraceStore {
 
     /// List traces with filtering
     pub fn list_traces(&self, filter: TraceFilter) -> Vec<TraceSummary> {
-        let mut summaries: Vec<TraceSummary> = self.traces
+        let mut summaries: Vec<TraceSummary> = self
+            .traces
             .iter()
             .filter_map(|entry| {
                 let trace = &entry.trace;
@@ -99,18 +100,21 @@ impl TraceStore {
                 let duration = trace.end_time.map(|e| e.0 - trace.start_time.0);
 
                 if let Some(min_dur) = filter.min_duration_nanos {
-                    if duration.map_or(true, |d| d < min_dur) {
+                    if duration.is_none_or(|d| d < min_dur) {
                         return None;
                     }
                 }
 
                 if let Some(max_dur) = filter.max_duration_nanos {
-                    if duration.map_or(false, |d| d > max_dur) {
+                    if duration.is_some_and(|d| d > max_dur) {
                         return None;
                     }
                 }
 
-                let has_errors = trace.spans.iter().any(|s| matches!(s.status, SpanStatus::Error { .. }));
+                let has_errors = trace
+                    .spans
+                    .iter()
+                    .any(|s| matches!(s.status, SpanStatus::Error { .. }));
 
                 if let Some(filter_errors) = filter.has_errors {
                     if has_errors != filter_errors {
@@ -118,7 +122,9 @@ impl TraceStore {
                     }
                 }
 
-                let root_span = trace.spans.iter()
+                let root_span = trace
+                    .spans
+                    .iter()
                     .find(|s| s.span_id == trace.root_span_id)?;
 
                 // Classify trace type based on attributes
@@ -154,7 +160,8 @@ impl TraceStore {
 
     fn update_trace(&self, trace_id: TraceId) {
         // Collect all spans for this trace
-        let spans: Vec<Span> = self.spans
+        let spans: Vec<Span> = self
+            .spans
             .iter()
             .filter(|entry| entry.value().trace_id == trace_id)
             .map(|entry| entry.value().clone())
@@ -163,8 +170,8 @@ impl TraceStore {
         if !spans.is_empty() {
             if let Some(trace) = Trace::from_spans(spans) {
                 // Check if trace is complete
-                let is_complete = trace.end_time.is_some()
-                    && trace.spans.iter().all(|s| s.end_time.is_some());
+                let is_complete =
+                    trace.end_time.is_some() && trace.spans.iter().all(|s| s.end_time.is_some());
 
                 if is_complete {
                     if let Some(duration) = trace.end_time.map(|e| e.0 - trace.start_time.0) {
@@ -176,10 +183,13 @@ impl TraceStore {
                     }
                 }
 
-                self.traces.insert(trace_id, StoredTrace {
-                    trace,
-                    created_at: SystemTime::now(),
-                });
+                self.traces.insert(
+                    trace_id,
+                    StoredTrace {
+                        trace,
+                        created_at: SystemTime::now(),
+                    },
+                );
             }
         }
     }

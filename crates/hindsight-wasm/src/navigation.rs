@@ -146,10 +146,7 @@ pub enum HindsightLink {
     /// Link to a specific trace
     Trace { trace_id: TraceId },
     /// Link to a specific span within a trace
-    TraceSpan {
-        trace_id: TraceId,
-        span_id: String,
-    },
+    TraceSpan { trace_id: TraceId, span_id: String },
     /// Link to Picante graph for a trace
     PicanteGraph { trace_id: TraceId },
     /// Link to a specific node in a Picante graph

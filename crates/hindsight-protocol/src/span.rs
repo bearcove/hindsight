@@ -2,7 +2,7 @@ use facet::Facet;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::trace_context::{TraceId, SpanId};
+use crate::trace_context::{SpanId, TraceId};
 
 /// Timestamp in nanoseconds since UNIX epoch
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Facet)]
@@ -88,15 +88,12 @@ impl Trace {
         let trace_id = spans[0].trace_id;
 
         // Find root span (one with no parent)
-        let root_span = spans.iter()
-            .find(|s| s.parent_span_id.is_none())?;
+        let root_span = spans.iter().find(|s| s.parent_span_id.is_none())?;
 
         let root_span_id = root_span.span_id;
         let start_time = root_span.start_time;
 
-        let end_time = spans.iter()
-            .filter_map(|s| s.end_time)
-            .max_by_key(|t| t.0);
+        let end_time = spans.iter().filter_map(|s| s.end_time).max_by_key(|t| t.0);
 
         Some(Self {
             trace_id,
@@ -109,7 +106,8 @@ impl Trace {
 
     /// Get children of a given span
     pub fn children(&self, span_id: SpanId) -> Vec<&Span> {
-        self.spans.iter()
+        self.spans
+            .iter()
             .filter(|s| s.parent_span_id == Some(span_id))
             .collect()
     }
@@ -162,10 +160,11 @@ impl Trace {
 }
 
 /// Type of trace based on framework detection
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Facet)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Facet)]
 #[repr(u8)]
 pub enum TraceType {
     /// Generic trace with no special attributes
+    #[default]
     Generic,
     /// Picante query execution trace
     Picante,
@@ -175,12 +174,6 @@ pub enum TraceType {
     Dodeca,
     /// Mixed trace with multiple framework types
     Mixed,
-}
-
-impl Default for TraceType {
-    fn default() -> Self {
-        Self::Generic
-    }
 }
 
 impl std::fmt::Display for TraceType {

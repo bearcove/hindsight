@@ -16,8 +16,9 @@ async fn test_http_upgrade_connect() {
     // Test HTTP upgrade connection
     let result = timeout(
         Duration::from_secs(5),
-        Tracer::connect_http("127.0.0.1:19900")
-    ).await;
+        Tracer::connect_http("127.0.0.1:19900"),
+    )
+    .await;
 
     assert!(result.is_ok(), "HTTP upgrade connection timed out");
     let tracer = result.unwrap().expect("Failed to connect via HTTP upgrade");
@@ -101,13 +102,19 @@ async fn test_invalid_upgrade_fails_gracefully() {
 
     // Try to connect - should fail
     let result = Tracer::connect_http("127.0.0.1:19920").await;
-    assert!(result.is_err(), "Expected connection to fail with invalid upgrade response");
+    assert!(
+        result.is_err(),
+        "Expected connection to fail with invalid upgrade response"
+    );
 
     match result {
         Err(e) => {
             let err_msg = e.to_string();
-            assert!(err_msg.contains("upgrade failed") || err_msg.contains("400"),
-                "Error message should mention upgrade failure: {}", err_msg);
+            assert!(
+                err_msg.contains("upgrade failed") || err_msg.contains("400"),
+                "Error message should mention upgrade failure: {}",
+                err_msg
+            );
         }
         Ok(_) => panic!("Expected error, got success"),
     }

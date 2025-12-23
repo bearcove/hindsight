@@ -1,6 +1,6 @@
-mod storage;
-mod service_impl;
 mod seed_data;
+mod service_impl;
+mod storage;
 
 use axum::{
     extract::Request,
@@ -20,7 +20,13 @@ use tower::Service;
 use crate::service_impl::HindsightServiceImpl;
 use crate::storage::TraceStore;
 
-pub async fn run_server(host: impl Into<String>, http_port: u16, tcp_port: u16, ttl_secs: u64, seed: bool) -> anyhow::Result<()> {
+pub async fn run_server(
+    host: impl Into<String>,
+    http_port: u16,
+    tcp_port: u16,
+    ttl_secs: u64,
+    seed: bool,
+) -> anyhow::Result<()> {
     let host = host.into();
     tracing::info!("🔍 Hindsight server starting");
 
@@ -78,7 +84,9 @@ async fn serve_tcp(
                 let service_impl = service.as_ref().clone();
                 Box::pin(async move {
                     let server = HindsightServiceServer::new(service_impl);
-                    server.dispatch(frame.desc.method_id, frame.payload_bytes()).await
+                    server
+                        .dispatch(frame.desc.method_id, frame.payload_bytes())
+                        .await
                 })
             });
 
@@ -97,12 +105,13 @@ async fn serve_http_unified(
     service: Arc<HindsightServiceImpl>,
 ) -> anyhow::Result<()> {
     let app = Router::new()
-        .route("/", get({
-            let service = service.clone();
-            move |headers: HeaderMap, req: Request| {
-                handle_root(headers, req, service.clone())
-            }
-        }))
+        .route(
+            "/",
+            get({
+                let service = service.clone();
+                move |headers: HeaderMap, req: Request| handle_root(headers, req, service.clone())
+            }),
+        )
         .route("/pkg/*file", get(serve_pkg_file))
         .nest_service("/static", tower_http::services::ServeDir::new("static"))
         .with_state(service.clone());
@@ -130,17 +139,26 @@ async fn serve_http_unified(
                     let peek_str = String::from_utf8_lossy(&peek_buf[..n]);
 
                     if peek_str.contains("Upgrade: websocket") {
-                        tracing::info!("Detected WebSocket upgrade from {}, handling with tokio-tungstenite", peer_addr);
+                        tracing::info!(
+                            "Detected WebSocket upgrade from {}, handling with tokio-tungstenite",
+                            peer_addr
+                        );
                         handle_websocket_tcp(tcp_stream, service).await;
-                    } else if peek_str.starts_with("GET ") || peek_str.starts_with("POST ") ||
-                              peek_str.starts_with("PUT ") || peek_str.starts_with("DELETE ") ||
-                              peek_str.starts_with("HEAD ") || peek_str.starts_with("OPTIONS ") {
+                    } else if peek_str.starts_with("GET ")
+                        || peek_str.starts_with("POST ")
+                        || peek_str.starts_with("PUT ")
+                        || peek_str.starts_with("DELETE ")
+                        || peek_str.starts_with("HEAD ")
+                        || peek_str.starts_with("OPTIONS ")
+                    {
                         // HTTP request - handle with axum
                         tracing::info!("Detected HTTP request from {}", peer_addr);
                         let tower_service = app.into_service();
-                        let hyper_service = hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
-                            tower_service.clone().call(request)
-                        });
+                        let hyper_service = hyper::service::service_fn(
+                            move |request: hyper::Request<hyper::body::Incoming>| {
+                                tower_service.clone().call(request)
+                            },
+                        );
 
                         if let Err(e) = hyper::server::conn::http1::Builder::new()
                             .serve_connection(TokioIo::new(tcp_stream), hyper_service)
@@ -178,7 +196,9 @@ async fn handle_root(
         Some("websocket") => {
             // WebSocket is now intercepted at TCP level before reaching here
             // This should never happen, but return error just in case
-            tracing::error!("WebSocket upgrade reached handle_root - should be intercepted at TCP level");
+            tracing::error!(
+                "WebSocket upgrade reached handle_root - should be intercepted at TCP level"
+            );
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Some("rapace") => {
@@ -194,10 +214,7 @@ async fn handle_root(
 }
 
 /// Handle raw binary Rapace TCP connection (no HTTP)
-async fn handle_rapace_tcp(
-    tcp_stream: tokio::net::TcpStream,
-    service: Arc<HindsightServiceImpl>,
-) {
+async fn handle_rapace_tcp(tcp_stream: tokio::net::TcpStream, service: Arc<HindsightServiceImpl>) {
     tracing::info!("Handling raw Rapace binary connection");
 
     let transport = rapace::Transport::stream(tcp_stream);
@@ -207,7 +224,9 @@ async fn handle_rapace_tcp(
         let service_impl = service.as_ref().clone();
         Box::pin(async move {
             let server = HindsightServiceServer::new(service_impl);
-            server.dispatch(frame.desc.method_id, frame.payload_bytes()).await
+            server
+                .dispatch(frame.desc.method_id, frame.payload_bytes())
+                .await
         })
     });
 
@@ -247,10 +266,7 @@ async fn handle_websocket_tcp(
 }
 
 /// Handle Rapace HTTP upgrade (for native clients)
-async fn handle_rapace_upgrade(
-    mut req: Request,
-    service: Arc<HindsightServiceImpl>,
-) -> Response {
+async fn handle_rapace_upgrade(mut req: Request, service: Arc<HindsightServiceImpl>) -> Response {
     // Extract the upgrade future from the request
     let upgrade = hyper::upgrade::on(&mut req);
 
@@ -304,7 +320,9 @@ async fn handle_rapace_connection(upgraded: Upgraded, service: Arc<HindsightServ
         let service_impl = service.as_ref().clone();
         Box::pin(async move {
             let server = HindsightServiceServer::new(service_impl);
-            server.dispatch(frame.desc.method_id, frame.payload_bytes()).await
+            server
+                .dispatch(frame.desc.method_id, frame.payload_bytes())
+                .await
         })
     });
 
@@ -314,7 +332,9 @@ async fn handle_rapace_connection(upgraded: Upgraded, service: Arc<HindsightServ
 }
 
 /// Serve WASM package files
-async fn serve_pkg_file(axum::extract::Path(file): axum::extract::Path<String>) -> impl IntoResponse {
+async fn serve_pkg_file(
+    axum::extract::Path(file): axum::extract::Path<String>,
+) -> impl IntoResponse {
     use axum::http::StatusCode;
 
     // Map file extensions to content types
@@ -331,17 +351,14 @@ async fn serve_pkg_file(axum::extract::Path(file): axum::extract::Path<String>) 
     // Read file from pkg directory
     // Try multiple possible paths (depends on where cargo run is executed from)
     let possible_paths = [
-        format!("pkg/{}", file),      // From workspace root
-        format!("../../pkg/{}", file), // From target/debug
+        format!("pkg/{}", file),          // From workspace root
+        format!("../../pkg/{}", file),    // From target/debug
         format!("../../../pkg/{}", file), // From target/debug/deps
     ];
 
     for pkg_path in &possible_paths {
         if let Ok(bytes) = std::fs::read(pkg_path) {
-            return (
-                [(axum::http::header::CONTENT_TYPE, content_type)],
-                bytes
-            ).into_response();
+            return ([(axum::http::header::CONTENT_TYPE, content_type)], bytes).into_response();
         }
     }
 

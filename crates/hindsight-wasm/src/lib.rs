@@ -4,17 +4,17 @@
 //!
 //! Pure Rust UI that connects to Hindsight server via Rapace over WebSocket.
 
+use hindsight_protocol::*;
+use rapace::{RpcSession, WebSocketTransport};
 use std::sync::Arc;
 use sycamore::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
-use rapace::{RpcSession, WebSocketTransport};
-use hindsight_protocol::*;
 
 mod components;
-mod routing;
 mod navigation;
+mod routing;
 
 use components::*;
 use navigation::{NavigationState, TabId};
@@ -129,7 +129,9 @@ fn App() -> View {
     let nav_state_for_tab_bar = nav_state.clone();
     let nav_state_for_detail_check = nav_state.clone();
     let is_detail_view = create_memo(move || {
-        nav_state_for_detail_check.current_route.with(|route| matches!(route, routing::Route::TraceDetail { .. }))
+        nav_state_for_detail_check
+            .current_route
+            .with(|route| matches!(route, routing::Route::TraceDetail { .. }))
     });
 
     view! {

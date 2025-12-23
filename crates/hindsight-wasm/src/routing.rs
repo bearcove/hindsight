@@ -13,10 +13,7 @@ pub enum Route {
     /// Single trace detail with waterfall
     TraceDetail { trace_id: TraceId },
     /// Single trace detail focused on a specific span
-    TraceDetailSpan {
-        trace_id: TraceId,
-        span_id: String,
-    },
+    TraceDetailSpan { trace_id: TraceId, span_id: String },
     /// Picante query graph visualization
     PicanteGraph { trace_id: TraceId },
     /// Rapace topology view

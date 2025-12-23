@@ -37,7 +37,10 @@ fn attr_bool(key: &str, value: bool) -> (String, AttributeValue) {
 /// Generate a variety of realistic traces
 fn generate_seed_traces() -> Vec<Trace> {
     let mut traces = Vec::new();
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
 
     // 1. Fast successful HTTP request (2 spans)
     {
@@ -117,15 +120,11 @@ fn generate_seed_traces() -> Vec<Trace> {
                 attr_str("db.system", "postgresql"),
                 attr_str("db.operation", "INSERT"),
             ]),
-            events: vec![
-                SpanEvent {
-                    name: "Waiting for lock".to_string(),
-                    timestamp: Timestamp(start.0 + 100_000_000),
-                    attributes: BTreeMap::from([
-                        attr_str("lock.type", "ROW EXCLUSIVE"),
-                    ]),
-                },
-            ],
+            events: vec![SpanEvent {
+                name: "Waiting for lock".to_string(),
+                timestamp: Timestamp(start.0 + 100_000_000),
+                attributes: BTreeMap::from([attr_str("lock.type", "ROW EXCLUSIVE")]),
+            }],
             status: SpanStatus::Ok,
             service_name: "order-service".to_string(),
         });
@@ -154,16 +153,14 @@ fn generate_seed_traces() -> Vec<Trace> {
                 attr_bool("error", true),
                 attr_str("error.message", "User not found"),
             ]),
-            events: vec![
-                SpanEvent {
-                    name: "exception".to_string(),
-                    timestamp: Timestamp(start.0 + 5_000_000),
-                    attributes: BTreeMap::from([
-                        attr_str("exception.type", "UserNotFoundException"),
-                        attr_str("exception.message", "No user with ID 999"),
-                    ]),
-                },
-            ],
+            events: vec![SpanEvent {
+                name: "exception".to_string(),
+                timestamp: Timestamp(start.0 + 5_000_000),
+                attributes: BTreeMap::from([
+                    attr_str("exception.type", "UserNotFoundException"),
+                    attr_str("exception.message", "No user with ID 999"),
+                ]),
+            }],
             status: SpanStatus::Error {
                 message: "User not found".to_string(),
             },
@@ -219,9 +216,7 @@ fn generate_seed_traces() -> Vec<Trace> {
             name: "check_inventory".to_string(),
             start_time: Timestamp(start.0 + 55_000_000),
             end_time: Some(Timestamp(start.0 + 175_000_000)),
-            attributes: BTreeMap::from([
-                attr_int("items.checked", 3),
-            ]),
+            attributes: BTreeMap::from([attr_int("items.checked", 3)]),
             events: vec![],
             status: SpanStatus::Ok,
             service_name: "inventory-service".to_string(),
@@ -250,9 +245,7 @@ fn generate_seed_traces() -> Vec<Trace> {
             name: "create_order".to_string(),
             start_time: Timestamp(start.0 + 455_000_000),
             end_time: Some(Timestamp(start.0 + 485_000_000)),
-            attributes: BTreeMap::from([
-                attr_str("order.id", "ORD-12345"),
-            ]),
+            attributes: BTreeMap::from([attr_str("order.id", "ORD-12345")]),
             events: vec![],
             status: SpanStatus::Ok,
             service_name: "order-service".to_string(),
@@ -363,18 +356,12 @@ fn generate_seed_traces() -> Vec<Trace> {
             name: "http.call external-api".to_string(),
             start_time: Timestamp(start.0 + 10_000_000),
             end_time: Some(Timestamp(start.0 + 5_040_000_000)),
-            attributes: BTreeMap::from([
-                attr_str("http.url", "https://external-api.example.com"),
-            ]),
-            events: vec![
-                SpanEvent {
-                    name: "timeout".to_string(),
-                    timestamp: Timestamp(start.0 + 5_000_000_000),
-                    attributes: BTreeMap::from([
-                        attr_str("timeout.duration", "5s"),
-                    ]),
-                },
-            ],
+            attributes: BTreeMap::from([attr_str("http.url", "https://external-api.example.com")]),
+            events: vec![SpanEvent {
+                name: "timeout".to_string(),
+                timestamp: Timestamp(start.0 + 5_000_000_000),
+                attributes: BTreeMap::from([attr_str("timeout.duration", "5s")]),
+            }],
             status: SpanStatus::Error {
                 message: "Request timeout after 5s".to_string(),
             },
@@ -403,15 +390,11 @@ fn generate_seed_traces() -> Vec<Trace> {
                 attr_int("batch.size", 1500),
                 attr_int("batch.processed", 1500),
             ]),
-            events: vec![
-                SpanEvent {
-                    name: "checkpoint".to_string(),
-                    timestamp: Timestamp(start.0 + 400_000_000),
-                    attributes: BTreeMap::from([
-                        attr_int("processed", 750),
-                    ]),
-                },
-            ],
+            events: vec![SpanEvent {
+                name: "checkpoint".to_string(),
+                timestamp: Timestamp(start.0 + 400_000_000),
+                attributes: BTreeMap::from([attr_int("processed", 750)]),
+            }],
             status: SpanStatus::Ok,
             service_name: "batch-processor".to_string(),
         };
@@ -548,13 +531,11 @@ fn generate_seed_traces() -> Vec<Trace> {
             start_time: Timestamp(start.0 + 200_000_000),
             end_time: Some(Timestamp(start.0 + 1_100_000_000)),
             attributes: BTreeMap::new(),
-            events: vec![
-                SpanEvent {
-                    name: "connection_refused".to_string(),
-                    timestamp: Timestamp(start.0 + 1_000_000_000),
-                    attributes: BTreeMap::from([attr_str("errno", "ECONNREFUSED")]),
-                },
-            ],
+            events: vec![SpanEvent {
+                name: "connection_refused".to_string(),
+                timestamp: Timestamp(start.0 + 1_000_000_000),
+                attributes: BTreeMap::from([attr_str("errno", "ECONNREFUSED")]),
+            }],
             status: SpanStatus::Error {
                 message: "ECONNREFUSED".to_string(),
             },

@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
@@ -42,7 +42,7 @@ fn serve(release: bool) -> Result<()> {
     Ok(())
 }
 
-fn build_wasm(project_root: &PathBuf, release: bool) -> Result<()> {
+fn build_wasm(project_root: &Path, release: bool) -> Result<()> {
     let wasm_crate = project_root.join("crates/hindsight-wasm");
     let mut cmd = Command::new("wasm-pack");
     cmd.arg("build")
@@ -64,7 +64,7 @@ fn build_wasm(project_root: &PathBuf, release: bool) -> Result<()> {
     Ok(())
 }
 
-fn copy_wasm(project_root: &PathBuf) -> Result<()> {
+fn copy_wasm(project_root: &Path) -> Result<()> {
     let src = project_root.join("crates/hindsight-wasm/pkg");
     let dest = project_root.join("crates/hindsight-server/static/wasm");
 
@@ -111,9 +111,7 @@ fn run_server(project_root: &PathBuf, release: bool) -> Result<()> {
         cmd.arg("--release");
     }
 
-    cmd.arg("--")
-        .arg("serve")
-        .arg("--seed");
+    cmd.arg("--").arg("serve").arg("--seed");
 
     let status = cmd.status()?;
     if !status.success() {

@@ -1,7 +1,7 @@
 //! UI components for Hindsight
 
-use sycamore::prelude::*;
 use hindsight_protocol::*;
+use sycamore::prelude::*;
 
 use crate::navigation::NavigationState;
 use crate::routing::Route;

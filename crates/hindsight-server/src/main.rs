@@ -41,9 +41,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { http_port, tcp_port, host, ttl, seed } => {
-            hindsight_server::run_server(host, http_port, tcp_port, ttl, seed).await
-        }
+        Commands::Serve {
+            http_port,
+            tcp_port,
+            host,
+            ttl,
+            seed,
+        } => hindsight_server::run_server(host, http_port, tcp_port, ttl, seed).await,
     }
 }
-

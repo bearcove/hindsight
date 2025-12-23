@@ -18,7 +18,8 @@ impl HindsightServiceImpl {
 impl HindsightService for HindsightServiceImpl {
     async fn ingest_spans(&self, spans: Vec<Span>) -> u32 {
         // Filter out any spans from Hindsight itself (prevent infinite loop!)
-        let spans: Vec<_> = spans.into_iter()
+        let spans: Vec<_> = spans
+            .into_iter()
             .filter(|span| span.service_name != "hindsight-server")
             .collect();
 
