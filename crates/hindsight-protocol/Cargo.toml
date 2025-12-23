@@ -10,7 +10,7 @@ description = "Protocol definitions for Hindsight distributed tracing"
 [dependencies]
 facet.workspace = true
 # Only need rapace for the service macro, not the runtime
-rapace = { path = "../../../rapace/crates/rapace", default-features = false }
+rapace = { version = "0.5", default-features = false }
 
 time.workspace = true
 thiserror.workspace = true

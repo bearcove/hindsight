@@ -85,7 +85,7 @@ impl Tracer {
         // HTTP upgrade successful, switching to Rapace protocol
 
         // Create transport from the upgraded stream
-        let transport = rapace::transport::StreamTransport::new(stream);
+        let transport = Transport::stream(stream);
         Self::new(transport).await
     }
 
@@ -94,18 +94,20 @@ impl Tracer {
     /// # Example
     /// ```no_run
     /// # use hindsight::Tracer;
+    /// # use hindsight::TracerError;
     /// # async fn example() -> Result<(), TracerError> {
     /// // TCP transport
-    /// let transport = rapace::transport::StreamTransport::connect("localhost:9090").await?;
+    /// let stream = tokio::net::TcpStream::connect("localhost:9090").await?;
+    /// let transport = rapace::Transport::stream(stream);
     /// let tracer = Tracer::new(transport).await?;
     ///
     /// // SHM transport (for same-machine communication)
-    /// // let transport = rapace::transport::shm::ShmTransport::open("/tmp/hindsight.shm").await?;
-    /// // let tracer = Tracer::new(transport).await?;
+    /// // let (client, server) = rapace::Transport::shm_pair();
+    /// // let tracer = Tracer::new(client).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn new<T: Transport + 'static>(transport: T) -> Result<Self, TracerError> {
+    pub async fn new(transport: Transport) -> Result<Self, TracerError> {
         // Detect service name (from env, or default)
         let service_name = std::env::var("HINDSIGHT_SERVICE_NAME")
             .unwrap_or_else(|_| "unknown".to_string());
@@ -113,7 +115,7 @@ impl Tracer {
         // Create Rapace session
         // IMPORTANT: Do NOT attach a tracer to this session!
         // (Prevents infinite loop)
-        let session = Arc::new(RpcSession::new(Arc::new(transport)));
+        let session = Arc::new(RpcSession::new(transport));
 
         // Spawn session runner
         let session_clone = session.clone();

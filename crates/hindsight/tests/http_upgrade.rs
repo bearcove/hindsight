@@ -7,7 +7,7 @@ use tokio::time::timeout;
 async fn test_http_upgrade_connect() {
     // Start a Hindsight server in the background
     let server_handle = tokio::spawn(async {
-        hindsight_server::run_server("127.0.0.1", 19900, 19901, 3600).await
+        hindsight_server::run_server("127.0.0.1", 19900, 19901, 3600, false).await
     });
 
     // Give the server time to start
@@ -41,12 +41,12 @@ async fn test_http_upgrade_connect() {
 /// Test that raw TCP (port 19901) still works alongside HTTP upgrade
 #[tokio::test]
 async fn test_raw_tcp_still_works() {
-    use rapace::transport::StreamTransport;
+    use rapace::Transport;
     use tokio::net::TcpStream;
 
     // Start a Hindsight server in the background
     let server_handle = tokio::spawn(async {
-        hindsight_server::run_server("127.0.0.1", 19910, 19911, 3600).await
+        hindsight_server::run_server("127.0.0.1", 19910, 19911, 3600, false).await
     });
 
     // Give the server time to start
@@ -57,7 +57,7 @@ async fn test_raw_tcp_still_works() {
         .await
         .expect("Failed to connect to TCP port");
 
-    let transport = StreamTransport::new(stream);
+    let transport = Transport::stream(stream);
     let tracer = Tracer::new(transport)
         .await
         .expect("Failed to create tracer");

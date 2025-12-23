@@ -1,5 +1,5 @@
 use hindsight::Tracer;
-use rapace::transport::StreamTransport;
+use rapace::Transport;
 use tokio::net::TcpStream;
 
 #[tokio::main]
@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect to Hindsight
     let stream = TcpStream::connect("127.0.0.1:1990").await?;
-    let transport = StreamTransport::new(stream);
+    let transport = Transport::stream(stream);
     let tracer = Tracer::new(transport).await?;
 
     // 1. Generic trace (no special attributes)

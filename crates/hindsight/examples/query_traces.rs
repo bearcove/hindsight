@@ -1,5 +1,5 @@
 use hindsight_protocol::{HindsightServiceClient, TraceFilter};
-use rapace::{RpcSession, transport::StreamTransport};
+use rapace::{RpcSession, Transport};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 
@@ -9,8 +9,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect to server
     let stream = TcpStream::connect("127.0.0.1:1990").await?;
-    let transport = StreamTransport::new(stream);
-    let session = Arc::new(RpcSession::new(Arc::new(transport)));
+    let transport = Transport::stream(stream);
+    let session = Arc::new(RpcSession::new(transport));
 
     // Spawn session runner
     let session_clone = session.clone();

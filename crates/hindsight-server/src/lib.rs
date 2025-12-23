@@ -68,17 +68,17 @@ async fn serve_tcp(
 
         let service = service.clone();
         tokio::spawn(async move {
-            let transport = Arc::new(rapace::transport::StreamTransport::new(stream));
+            let transport = rapace::Transport::stream(stream);
 
             // IMPORTANT: No tracer attached! (Prevents infinite loop)
             let session = Arc::new(RpcSession::new(transport));
 
             // Create dispatcher function
-            session.set_dispatcher(move |_channel_id, method_id, payload| {
+            session.set_dispatcher(move |frame| {
                 let service_impl = service.as_ref().clone();
                 Box::pin(async move {
                     let server = HindsightServiceServer::new(service_impl);
-                    server.dispatch(method_id, &payload).await
+                    server.dispatch(frame.desc.method_id, frame.payload_bytes()).await
                 })
             });
 
@@ -200,14 +200,14 @@ async fn handle_rapace_tcp(
 ) {
     tracing::info!("Handling raw Rapace binary connection");
 
-    let transport = Arc::new(rapace::transport::StreamTransport::new(tcp_stream));
+    let transport = rapace::Transport::stream(tcp_stream);
     let session = Arc::new(RpcSession::new(transport));
 
-    session.set_dispatcher(move |_channel_id, method_id, payload| {
+    session.set_dispatcher(move |frame| {
         let service_impl = service.as_ref().clone();
         Box::pin(async move {
             let server = HindsightServiceServer::new(service_impl);
-            server.dispatch(method_id, &payload).await
+            server.dispatch(frame.desc.method_id, frame.payload_bytes()).await
         })
     });
 
@@ -230,8 +230,8 @@ async fn handle_websocket_tcp(
         Ok(ws_stream) => {
             tracing::info!("WebSocket handshake complete, starting Rapace session");
 
-            // Use Rapace's TungsteniteTransport (TcpStream IS Sync!)
-            let transport = Arc::new(rapace_transport_websocket::TungsteniteTransport::new(ws_stream));
+            // Create WebSocket transport using rapace's Transport enum
+            let transport = rapace::Transport::websocket(ws_stream);
             let server = HindsightServiceServer::new(service.as_ref().clone());
 
             if let Err(e) = server.serve(transport).await {
@@ -293,18 +293,18 @@ async fn handle_rapace_connection(upgraded: Upgraded, service: Arc<HindsightServ
         }
     });
 
-    // Use the Sync-safe DuplexStream with StreamTransport
-    let transport = Arc::new(rapace::transport::StreamTransport::new(server_stream));
+    // Use the Sync-safe DuplexStream with Transport
+    let transport = rapace::Transport::stream(server_stream);
 
     // IMPORTANT: No tracer attached! (Prevents infinite loop)
     let session = Arc::new(RpcSession::new(transport));
 
     // Create dispatcher function
-    session.set_dispatcher(move |_channel_id, method_id, payload| {
+    session.set_dispatcher(move |frame| {
         let service_impl = service.as_ref().clone();
         Box::pin(async move {
             let server = HindsightServiceServer::new(service_impl);
-            server.dispatch(method_id, &payload).await
+            server.dispatch(frame.desc.method_id, frame.payload_bytes()).await
         })
     });
 
